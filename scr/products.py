@@ -20,6 +20,31 @@ def load_settings():
         print(f"❌ Помилка: файл конфігурації пошкоджений: {config_path}")
         return None
 
+def setup_log_file():
+    """
+    Перевіряє наявність logs.log, перейменовує його, якщо існує,
+    та повертає шлях до нового файлу.
+    """
+    log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    
+    current_log_path = os.path.join(log_dir, "logs.log")
+    
+    # Перевіряємо, чи існує файл logs.log
+    if os.path.exists(current_log_path):
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        new_log_path = os.path.join(log_dir, f"logs_{timestamp}.log")
+        try:
+            os.rename(current_log_path, new_log_path)
+            print(f"✅ Старий лог-файл перейменовано на {os.path.basename(new_log_path)}")
+        except OSError as e:
+            print(f"❌ Помилка при перейменуванні лог-файлу: {e}")
+            # Якщо не вдалося перейменувати, повертаємо старий шлях
+            return current_log_path
+
+    # Повертаємо шлях, який буде використовуватись для запису логів
+    return current_log_path
+
 def log_message(message, log_file_path):
     """
     Записує повідомлення в лог-файл.
@@ -31,18 +56,14 @@ def export_products():
     """
     Експорт усіх товарів у CSV пачками по 100.
     """
-    # Шлях до CSV
-    csv_path = os.path.join(os.path.dirname(__file__), "..", "csv", "input", "zalishki.csv")
-
-    # Шлях до папки логів
-    log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
-    os.makedirs(log_dir, exist_ok=True)
+    settings = load_settings()
+    if not settings:
+        return
+        
+    log_file_path = setup_log_file()
     
-    # Створення унікального імені для лог-файлу
-    log_file_name = f"export_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
-    log_file_path = os.path.join(log_dir, log_file_name)
-
-    # Заголовки CSV
+    csv_path = os.path.join(os.path.dirname(__file__), "..", "csv", "input", "zalishki.csv")
+    
     headers = [
         "ID", "Артикул", "Назва", "Опубліковано", "Запаси", "Звичайна ціна", "Категорії",
         "Мета: shtrih_cod", "Мета: postachalnyk", "Мета: artykul_lutsk", "Мета: url_lutsk",
@@ -58,11 +79,9 @@ def export_products():
     exported_count = 0
     errors = []
 
-    # Логування початку процесу
     log_message("🚀 Початок експорту товарів.", log_file_path)
 
     try:
-        # Отримати загальну кількість товарів
         response = wcapi.get("products", params={"per_page": 1})
         if response.status_code != 200:
             error_msg = f"Помилка {response.status_code} при підрахунку товарів: {response.text}"
@@ -126,7 +145,6 @@ def export_products():
                     writer.writerow(row)
                     exported_count += 1
                 
-                # Логування проміжних результатів
                 if exported_count % 100 == 0 or exported_count == total_products:
                     elapsed = int(time.time() - start_time)
                     status_message = f"✅ Вивантажено {exported_count} з {total_products} ({elapsed} сек)"
@@ -145,12 +163,10 @@ def export_products():
         end_time = time.time()
         elapsed_time = int(end_time - start_time)
         
-        # Підсумкове повідомлення для консолі
         print(f"🎉 Експорт завершено. Вивантажено {exported_count} з {total_products} товарів за {elapsed_time} сек.")
         if errors:
             print(f"⚠️ Експорт завершився з {len(errors)} помилками. Деталі в лог-файлі.")
         
-        # Підсумкове повідомлення для лог-файлу
         log_message(f"--- Підсумок експорту ---", log_file_path)
         log_message(f"Статус: {'Успішно' if not errors else 'Завершено з помилками'}", log_file_path)
         log_message(f"Кількість товарів: {exported_count} з {total_products}", log_file_path)
