@@ -1,6 +1,17 @@
 import csv
+import json
 import os
+import time
 from scr.updater import get_wc_api
+
+
+def load_settings():
+    """
+    Завантаження конфігурації з settings.json
+    """
+    config_path = os.path.join(os.path.dirname(__file__), "..", "config", "settings.json")
+    with open(config_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def export_products():
@@ -23,12 +34,25 @@ def export_products():
 
     wcapi = get_wc_api()
 
+    start_time = time.time()
+
+    # Отримати загальну кількість товарів
+    response = wcapi.get("products", params={"per_page": 1})
+    if response.status_code != 200:
+        print(f"❌ Помилка {response.status_code} при підрахунку товарів")
+        return
+
+    total_products = int(response.headers.get("X-WP-Total", 0))
+    print(f"🔎 Загальна кількість товарів: {total_products}")
+
+    exported_count = 0
+
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(headers)
 
         page = 1
-        while True:
+        while exported_count < total_products:
             response = wcapi.get(
                 "products",
                 params={
@@ -44,7 +68,6 @@ def export_products():
 
             products = response.json()
             if not products:
-                print("✅ Усі товари експортовано")
                 break
 
             for product in products:
@@ -72,7 +95,12 @@ def export_products():
                 ]
                 writer.writerow(row)
 
-                print(f"✅ Додано {product.get('name')} (ID {product.get('id')})")
+                exported_count += 1
+                if exported_count % 100 == 0 or exported_count == total_products:
+                    elapsed = int(time.time() - start_time)
+                    print(f"✅ Вивантажено {exported_count} з {total_products} ({elapsed} сек)")
 
             page += 1
-    print("Complite")
+            time.sleep(1)  # ⏳ Пауза 1 секунда між запитами
+
+    print("🎉 Експорт завершено")
