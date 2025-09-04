@@ -30,7 +30,6 @@ def setup_log_file():
     
     current_log_path = os.path.join(log_dir, "logs.log")
     
-    # Перевіряємо, чи існує файл logs.log
     if os.path.exists(current_log_path):
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         new_log_path = os.path.join(log_dir, f"logs_{timestamp}.log")
@@ -39,18 +38,17 @@ def setup_log_file():
             print(f"✅ Старий лог-файл перейменовано на {os.path.basename(new_log_path)}")
         except OSError as e:
             print(f"❌ Помилка при перейменуванні лог-файлу: {e}")
-            # Якщо не вдалося перейменувати, повертаємо старий шлях
             return current_log_path
 
-    # Повертаємо шлях, який буде використовуватись для запису логів
     return current_log_path
 
-def log_message(message, log_file_path):
+def log_message(message, log_file_path=os.path.join(os.path.dirname(__file__), "..", "logs", "logs.log")):
     """
     Записує повідомлення в лог-файл.
     """
     with open(log_file_path, "a", encoding="utf-8") as log_file:
         log_file.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {message}\n")
+
 
 def export_products():
     """
@@ -176,3 +174,116 @@ def export_products():
             log_message("Перелік помилок:", log_file_path)
             for err in errors:
                 log_message(f"- {err}", log_file_path)
+
+
+def check_exported_csv():
+    """
+    Перевіряє і очищає дані в експортованому CSV файлі.
+    """
+    settings = load_settings()
+    if not settings:
+        return
+
+    csv_path = os.path.join(os.path.dirname(__file__), "..", "csv", "input", "zalishki.csv")
+    if not os.path.exists(csv_path):
+        print("❌ Файл експорту не знайдено.")
+        return
+
+    log_file_path = os.path.join(os.path.dirname(__file__), "..", "logs", "logs.log")
+    log_message("🔍 Початок перевірки експортованого CSV.", log_file_path)
+
+    temp_file_path = f"{csv_path}.temp"
+    validation_errors = []
+    processed_rows = []
+
+    try:
+        with open(csv_path, "r", newline="", encoding="utf-8") as infile:
+            reader = csv.reader(infile)
+            headers = next(reader)
+            
+            row_number = 1
+            for row in reader:
+                row_number += 1
+                row_id = row[0] if len(row) > 0 else "Невідомий ID"
+
+                # Перевірка та очищення колонки 1 (ID)
+                try:
+                    int(row[0])
+                except (ValueError, IndexError):
+                    validation_errors.append(f"❌ Рядок {row_number}, ID {row_id}: Колонка 1 (ID) не є цілим числом. Значення: '{row[0]}'")
+                
+                # Перевірка та очищення колонки 2 (Артикул)
+                try:
+                    int(row[1])
+                except (ValueError, IndexError):
+                    validation_errors.append(f"❌ Рядок {row_number}, ID {row_id}: Колонка 2 (Артикул) не є цілим числом. Значення: '{row[1]}'")
+                
+                 # Перевірка колонки 3 (Назва)
+                if len(row) > 2 and not row[2].strip():
+                    validation_errors.append(f"❌ Рядок {row_number}, ID {row_id}: Колонка 3 (Назва) не може бути пустою.")
+
+                # Перевірка та очищення колонки 4 (Опубліковано)
+                if len(row) > 3 and row[3].lower() not in ["yes", "no"]:
+                    validation_errors.append(f"❌ Рядок {row_number}, ID {row_id}: Колонка 4 (Опубліковано) очікує 'yes' або 'no'. Значення: '{row[3]}'")
+                
+                # Перевірка та очищення колонки 5 (Запаси)
+                if len(row) > 4:
+                    if row[4] == "":
+                        row[4] = "0"
+                        log_message(f"ℹ️ Рядок {row_number}, ID {row_id}: Колонка 5 (Запаси) була пустою, встановлено значення '0'.", log_file_path)
+                    try:
+                        int(row[4])
+                    except ValueError:
+                        validation_errors.append(f"❌ Рядок {row_number}, ID {row_id}: Колонка 5 (Запаси) не є цілим числом. Значення: '{row[4]}'")
+                
+                # Перевірка та очищення колонки 6 (Звичайна ціна)
+                try:
+                    int(row[5])
+                except (ValueError, IndexError):
+                    validation_errors.append(f"❌ Рядок {row_number}, ID {row_id}: Колонка 6 (Звичайна ціна) не є цілим числом. Значення: '{row[5]}'")
+                
+                # Перевірка колонки 7 (Категорії)
+                if len(row) > 6 and not row[6].strip():
+                    validation_errors.append(f"❌ Рядок {row_number}, ID {row_id}: Колонка 7 (Категорії) не може бути пустою.")
+
+                # Очищення колонки 9 (Постачальник)
+                if len(row) > 8:
+                    row[8] = row[8].replace("[", "").replace("'", "").replace("]", "")
+                
+                # Очищення колонок 11, 13, 15, 17
+                for i in [10, 12, 14, 16]:
+                    if len(row) > i:
+                        row[i] = row[i].replace("{'title': '', 'url': '", "").replace("', 'target': ''}", "")
+                
+                processed_rows.append(row)
+    
+    except Exception as e:
+        print(f"❌ Виникла помилка під час перевірки файлу: {e}")
+        log_message(f"❌ Виникла помилка під час перевірки файлу: {e}", log_file_path)
+        return
+
+    # Запис відсортованого та очищеного файлу
+    print("⏳ Сортую дані та записую оновлений файл...")
+    try:
+        processed_rows.sort(key=lambda x: int(x[0]))
+    except (ValueError, IndexError) as e:
+        print(f"❌ Помилка сортування: неможливо перетворити ID на число. {e}")
+        log_message(f"❌ Помилка сортування: неможливо перетворити ID на число. {e}", log_file_path)
+
+    with open(temp_file_path, "w", newline="", encoding="utf-8") as outfile:
+        writer = csv.writer(outfile)
+        writer.writerow(headers)
+        writer.writerows(processed_rows)
+
+    os.replace(temp_file_path, csv_path)
+
+    # Логування результатів
+    log_message("🎉 Перевірку та очищення файлу завершено.", log_file_path)
+    if validation_errors:
+        log_message(f"⚠️ Знайдено {len(validation_errors)} помилок:", log_file_path)
+        for error in validation_errors:
+            log_message(error, log_file_path)
+        print(f"⚠️ Знайдено {len(validation_errors)} помилок. Деталі в лог-файлі.")
+    else:
+        log_message("✅ Всі дані коректні. Помилок не знайдено.", log_file_path)
+        print("✅ Перевірка завершена, помилок не знайдено.")

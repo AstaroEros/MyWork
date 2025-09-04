@@ -1,6 +1,6 @@
 import argparse
 from scr.updater import check_version
-from scr.products import export_products
+from scr.products import export_products, check_exported_csv
 
 def main():
     """
@@ -20,6 +20,12 @@ def main():
         action="store_true", 
         help="Перевірити версію WooCommerce REST API."
     )
+
+    parser.add_argument(
+        "--check-csv",
+        action="store_true",
+        help="Перевірити та відсортувати експортований CSV файл."
+    )
     # Сюди можна буде додати інші аргументи, наприклад, для імпорту
     # parser.add_argument(
     #     "--import-products", 
@@ -37,6 +43,9 @@ def main():
     elif args.check_version:
         print("🔍 Запускаю перевірку версії WooCommerce...")
         check_version()
+    elif args.check_csv:
+        print("⚙️ Запускаю перевірку експортованого CSV...")
+        check_exported_csv()
     # elif args.import_products:
     #     # print("📦 Запускаю імпорт товарів...")
     #     # import_products() # Цю функцію ми створимо пізніше
