@@ -2,6 +2,9 @@ import csv
 import json
 import os
 import time
+import requests
+import shutil
+import re
 from scr.updater import get_wc_api
 from datetime import datetime
 
@@ -287,3 +290,150 @@ def check_exported_csv():
     else:
         log_message("✅ Всі дані коректні. Помилок не знайдено.", log_file_path)
         print("✅ Перевірка завершена, помилок не знайдено.")
+
+
+
+def download_supplier_price_list(supplier_id):
+    """
+    Скачує прайс-лист від постачальника за його ID.
+    """
+    settings = load_settings()
+    if not settings:
+        return
+    
+    supplier_info = settings.get("suppliers", {}).get(str(supplier_id))
+    if not supplier_info:
+        print(f"❌ Помилка: Інформацію про постачальника з ID '{supplier_id}' не знайдено.")
+        return
+
+    base_dir = os.path.join(os.path.dirname(__file__), "..")
+    log_file_path = os.path.join(base_dir, settings.get("log_file_path"))
+    
+    url = supplier_info.get("download_url")
+    csv_path = os.path.join(base_dir, supplier_info.get("csv_path"))
+   
+    log_message(f"⏳ Запускаю завантаження прайс-листа від {supplier_id} (ID: {supplier_id}).", log_file_path)
+
+    # Видалення старого файлу, якщо він існує
+    if os.path.exists(csv_path):
+        try:
+            os.remove(csv_path)
+            log_message(f"✅ Старий файл {os.path.basename(csv_path)} успішно видалено.", log_file_path)
+        except OSError as e:
+            log_message(f"❌ Помилка при видаленні старого файлу: {e}", log_file_path)
+            print(f"❌ Помилка: {e}")
+            return
+    
+    try:
+        # Завантаження файлу
+        with requests.get(url, stream=True) as r:
+            r.raise_for_status()
+            with open(csv_path, 'wb') as f:
+                shutil.copyfileobj(r.raw, f)
+        
+        log_message(f"🎉 Прайс-лист від {supplier_id} успішно завантажено.", log_file_path)
+        print(f"✅ Прайс-лист від {supplier_id} успішно завантажено.")
+    except requests.exceptions.RequestException as e:
+        log_message(f"❌ Помилка завантаження файлу від {supplier_id}: {e}", log_file_path)
+        print(f"❌ Помилка завантаження файлу: {e}")
+
+
+def process_supplier_1_price_list():
+    """
+    Обробляє та очищає прайс-лист від постачальника 1.
+    """
+    settings = load_settings()
+    if not settings:
+        return
+
+    supplier_id = "1"
+    supplier_info = settings.get("suppliers", {}).get(supplier_id)
+    if not supplier_info:
+        print(f"❌ Помилка: Інформацію про постачальника з ID '{supplier_id}' не знайдено.")
+        return
+
+    base_dir = os.path.join(os.path.dirname(__file__), "..")
+    log_file_path = os.path.join(base_dir, settings.get("log_file_path"))
+    csv_path = os.path.join(base_dir, supplier_info.get("csv_path"))
+    delimiter = supplier_info.get("delimiter", ",")
+
+    if not os.path.exists(csv_path):
+        print(f"❌ Файл прайс-листа для постачальника {supplier_id} не знайдено за шляхом: {csv_path}")
+        return
+
+    log_message(f"⚙️ Запускаю обробку прайс-листа для постачальника {supplier_id}.", log_file_path)
+
+    # Список слів для видалення рядків
+    words_to_filter_from_name = ["jos", "a-toys"]
+    words_to_filter_from_brand = ["toyfa"]
+
+    temp_file_path = f"{csv_path}.temp"
+    processed_rows = []
+    skipped_rows = 0
+    total_rows = 0
+
+    try:
+        with open(csv_path, "r", newline="", encoding="utf-8") as infile:
+            reader = csv.reader(infile, delimiter=delimiter)
+            headers = next(reader)
+            processed_rows.append(headers)
+            
+            row_number = 1
+            for row in reader:
+                row_number += 1
+                total_rows += 1
+
+                # Перевірка колонки 4 (ціна) на наявність літер
+                if len(row) > 3:
+                    price_value = row[3]
+                    if re.search(r'[a-zA-Z]', price_value):
+                        log_message(f"🚫 Видалено рядок {row_number} через наявність літер у колонці 4 (ціна): '{price_value}'.", log_file_path)
+                        skipped_rows += 1
+                        continue
+
+                # Фільтрація за колонкою 3 (назва)
+                if len(row) > 2:
+                    product_name = row[2].lower()
+                    if any(word in product_name for word in words_to_filter_from_name):
+                        log_message(f"🚫 Видалено рядок {row_number} через заборонене слово в назві ('{row[2]}').", log_file_path)
+                        skipped_rows += 1
+                        continue
+                
+                # Фільтрація за колонкою 8 (бренд)
+                if len(row) > 7:
+                    brand_name = row[7].lower()
+                    if any(word in brand_name for word in words_to_filter_from_brand):
+                        log_message(f"🚫 Видалено рядок {row_number} через заборонене слово в бренді ('{row[7]}').", log_file_path)
+                        skipped_rows += 1
+                        continue
+
+                # Перетворення колонки 4 (ціна) з float на int
+                if len(row) > 3 and row[3]:
+                    try:
+                        row[3] = str(int(float(row[3])))
+                    except (ValueError, IndexError):
+                        log_message(f"⚠️ Помилка перетворення ціни в рядку {row_number}. Значення: '{row[3]}'", log_file_path)
+                
+                # Заміна значення в колонці 7 (категорія)
+                if len(row) > 6 and row[6] == ">3":
+                    row[6] = "4"
+                    
+                processed_rows.append(row)
+    
+    except Exception as e:
+        log_message(f"❌ Виникла помилка під час обробки файлу: {e}", log_file_path)
+        print(f"❌ Виникла помилка під час обробки файлу: {e}")
+        return
+
+    with open(temp_file_path, "w", newline="", encoding="utf-8") as outfile:
+        writer = csv.writer(outfile, delimiter=delimiter)
+        writer.writerows(processed_rows)
+
+    os.replace(temp_file_path, csv_path)
+
+    log_message(f"🎉 Обробку прайс-листа для постачальника {supplier_id} завершено.", log_file_path)
+    log_message(f"--- Підсумок обробки: ---", log_file_path)
+    log_message(f"📦 Всього рядків у файлі: {total_rows}", log_file_path)
+    log_message(f"🗑️ Видалено рядків: {skipped_rows}", log_file_path)
+    log_message(f"✅ Оброблені рядки: {len(processed_rows) - 1}", log_file_path)
+    print("✅ Обробка прайс-листа завершена. Деталі в лог-файлі.")

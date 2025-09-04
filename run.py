@@ -1,7 +1,6 @@
 import argparse
 from scr.updater import check_version
-from scr.products import export_products, check_exported_csv
-
+from scr.products import export_products, check_exported_csv, download_supplier_price_list, process_supplier_1_price_list
 def main():
     """
     Основна функція для обробки аргументів командного рядка та запуску відповідних функцій.
@@ -26,6 +25,20 @@ def main():
         action="store_true",
         help="Перевірити та відсортувати експортований CSV файл."
     )
+
+    parser.add_argument(
+        "--download-supplier",
+        nargs="?",
+        const=1,  # За замовчуванням ID постачальника = 1
+        type=int,
+        help="Завантажити прайс-лист від постачальника за його ID (наприклад, --download-supplier 1)."
+    )
+
+    parser.add_argument(
+        "--process-supplier-1",
+        action="store_true",
+        help="Обробка прайс-листа для постачальника 1."
+    )
     # Сюди можна буде додати інші аргументи, наприклад, для імпорту
     # parser.add_argument(
     #     "--import-products", 
@@ -46,6 +59,12 @@ def main():
     elif args.check_csv:
         print("⚙️ Запускаю перевірку експортованого CSV...")
         check_exported_csv()
+    elif args.download_supplier:
+        print(f"🌐 Запускаю завантаження прайс-листа постачальника з ID {args.download_supplier}...")
+        download_supplier_price_list(args.download_supplier)
+    elif args.process_supplier_1:
+        print("⚙️ Запускаю обробку прайс-листа постачальника 1...")
+        process_supplier_1_price_list()
     # elif args.import_products:
     #     # print("📦 Запускаю імпорт товарів...")
     #     # import_products() # Цю функцію ми створимо пізніше
