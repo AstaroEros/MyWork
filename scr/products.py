@@ -6,8 +6,9 @@ import requests
 import shutil
 import re
 import pandas as pd
+import random # Новий імпорт
 from scr.updater import get_wc_api
-from datetime import datetime
+from datetime import datetime, timedelta
 
 def load_settings():
     """
@@ -956,3 +957,284 @@ def process_and_combine_all_data():
     except Exception as e:
         log_message(f"❌ Помилка при збереженні зведеної таблиці: {e}", log_file_path)
         print(f"❌ Помилка: {e}")
+
+
+def prepare_for_website_upload():
+    """
+    Готує дані зі зведеної таблиці для завантаження на сайт,
+    виконуючи кожен крок окремо з записом у файл.
+    """
+    base_dir = os.path.join(os.path.dirname(__file__), "..")
+    log_file_path = os.path.join(base_dir, "logs", "logs.log")
+    source_file_path = os.path.join(base_dir, "csv", "process", "zvedena.csv")
+    target_file_path = os.path.join(base_dir, "csv", "process", "na_sait.csv")
+    
+    log_message("⚙️ Запускаю підготовку даних для сайту...", log_file_path)
+
+    # Крок 1: Очищаємо табличку na_sait.csv
+    try:
+        log_message("⚙️ Крок 1: Очищаю файл 'na_sait.csv'...", log_file_path)
+        with open(target_file_path, 'w', newline='', encoding='utf-8') as f:
+            pass
+        log_message("✅ Файл 'na_sait.csv' успішно очищено.", log_file_path)
+    except Exception as e:
+        log_message(f"❌ Помилка при очищенні файлу {os.path.basename(target_file_path)}: {e}", log_file_path)
+        return
+
+    # Крок 2: Копіюємо колонки 1, 23-30 із zvedena.csv
+    try:
+        log_message("⚙️ Крок 2: Копіюю дані зі 'zvedena.csv'...", log_file_path)
+        with open(source_file_path, 'r', newline='', encoding='utf-8') as infile, \
+             open(target_file_path, 'w', newline='', encoding='utf-8') as outfile:
+            
+            reader = csv.reader(infile)
+            writer = csv.writer(outfile)
+            
+            try:
+                header = next(reader)
+                columns_to_copy = [1] + list(range(23, min(31, len(header))))
+                new_header = [header[i] for i in columns_to_copy]
+                writer.writerow(new_header)
+            except StopIteration:
+                log_message("❌ Помилка: Вхідний файл порожній.", log_file_path)
+                return
+            
+            copied_count = 0
+            for i, row in enumerate(reader):
+                selected_columns = [row[1]] if len(row) > 1 else [""]
+                
+                for j in range(23, 31):
+                    if j < len(row):
+                        selected_columns.append(row[j])
+                    else:
+                        selected_columns.append("")
+                
+                if len(selected_columns) > 1:
+                    writer.writerow(selected_columns)
+                    copied_count += 1
+        
+        log_message(f"✅ Крок 2 завершено. Скопійовано {copied_count} рядків.", log_file_path)
+    except FileNotFoundError:
+        log_message(f"❌ Помилка: Вхідний файл {os.path.basename(source_file_path)} не знайдено.", log_file_path)
+        return
+    except Exception as e:
+        log_message(f"❌ Виникла помилка під час копіювання: {e}", log_file_path)
+        return
+
+    # Крок 3: Додаємо 4 нові колонки з назвами
+    try:
+        log_message("⚙️ Крок 3: Додаю 4 нові колонки...", log_file_path)
+        with open(target_file_path, 'r', newline='', encoding='utf-8') as infile:
+            reader = csv.reader(infile)
+            header = next(reader)
+            rows = list(reader)
+        
+        new_header = header + ["sale_price", "sale_price_dates_from", "sale_price_dates_to", "Знижка%"]
+        
+        with open(target_file_path, 'w', newline='', encoding='utf-8') as outfile:
+            writer = csv.writer(outfile)
+            writer.writerow(new_header)
+            for row in rows:
+                row += [""] * 4
+                writer.writerow(row)
+        
+        log_message(f"✅ Крок 3 завершено. Додано 4 нові колонки. Рядків у файлі: {len(rows)}", log_file_path)
+    except Exception as e:
+        log_message(f"❌ Виникла помилка під час додавання колонок: {e}", log_file_path)
+        return
+
+    # Крок 4: Видаляємо всі рядки, де в колонці з індексом 3 стоїть "0"
+    try:
+        log_message("⚙️ Крок 4: Видаляю рядки з нульовими значеннями...", log_file_path)
+        with open(target_file_path, 'r', newline='', encoding='utf-8') as infile:
+            reader = csv.reader(infile)
+            header = next(reader)
+            rows = list(reader)
+
+        original_count = len(rows)
+        filtered_rows = [row for row in rows if row[3] != "0"]
+        deleted_count = original_count - len(filtered_rows)
+
+        with open(target_file_path, 'w', newline='', encoding='utf-8') as outfile:
+            writer = csv.writer(outfile)
+            writer.writerow(header)
+            writer.writerows(filtered_rows)
+        
+        log_message(f"✅ Крок 4 завершено. Видалено {deleted_count} рядків. Залишилось {len(filtered_rows)}.", log_file_path)
+    except Exception as e:
+        log_message(f"❌ Виникла помилка під час видалення рядків: {e}", log_file_path)
+        return
+
+    # Крок 5: Заповнюємо колонку з індексом 12 рандомними значеннями
+    try:
+        log_message("⚙️ Крок 5: Заповнюю колонку 12 рандомними значеннями...", log_file_path)
+        with open(target_file_path, 'r', newline='', encoding='utf-8') as infile:
+            reader = csv.reader(infile)
+            header = next(reader)
+            rows = list(reader)
+        
+        random_choices = [0, 2, 3, 5]
+        weights = [94, 3, 2, 1]
+        
+        updated_count = 0
+        for row in rows:
+            try:
+                if len(row) > 2 and float(row[1]) > 0 and float(row[2].replace(',', '.')) > 800:
+                    random_value = random.choices(random_choices, weights=weights, k=1)[0]
+                    row[12] = str(random_value)
+                    if random_value > 0:
+                        updated_count += 1
+            except (ValueError, IndexError):
+                continue
+        
+        with open(target_file_path, 'w', newline='', encoding='utf-8') as outfile:
+            writer = csv.writer(outfile)
+            writer.writerow(header)
+            writer.writerows(rows)
+            
+        log_message(f"✅ Крок 5 завершено. Успішно заповнено {updated_count} рядків.", log_file_path)
+    except Exception as e:
+        log_message(f"❌ Виникла помилка під час заповнення: {e}", log_file_path)
+        return
+
+    # Крок 6: Заповнюємо колонку з індексом 9 за формулою
+    try:
+        log_message("⚙️ Крок 6: Заповнюю колонку 9 за формулою...", log_file_path)
+        with open(target_file_path, 'r', newline='', encoding='utf-8') as infile:
+            reader = csv.reader(infile)
+            header = next(reader)
+            rows = list(reader)
+
+        updated_count = 0
+        for row in rows:
+            try:
+                c_val = float(row[2].replace(',', '.') if row[2] else 0)
+                m_val = float(row[12]) if row[12] else 0
+                
+                if m_val > 0:
+                    result = round(c_val * (100 - m_val) / 100, 0)
+                    row[9] = str(int(result))
+                    updated_count += 1
+                else:
+                    row[9] = ""
+            except (ValueError, IndexError):
+                row[9] = ""
+                continue
+        
+        with open(target_file_path, 'w', newline='', encoding='utf-8') as outfile:
+            writer = csv.writer(outfile)
+            writer.writerow(header)
+            writer.writerows(rows)
+            
+        log_message(f"✅ Крок 6 завершено. Заповнено {updated_count} рядків.", log_file_path)
+    except Exception as e:
+        log_message(f"❌ Виникла помилка під час заповнення колонки 9: {e}", log_file_path)
+        return
+
+    # Крок 7: Видаляємо рядки, де колонка 9 пуста, а 4 та 5 дорівнюють "0"
+    try:
+        log_message("⚙️ Крок 7: Видаляю рядки, де колонка 9 пуста, а 4 і 5 дорівнюють '0'...", log_file_path)
+        with open(target_file_path, 'r', newline='', encoding='utf-8') as infile:
+            reader = csv.reader(infile)
+            header = next(reader)
+            rows = list(reader)
+        
+        original_count = len(rows)
+        
+        filtered_rows = []
+        for row in rows:
+            if not (row[9] == "" and row[4] == "0" and row[5] == "0"):
+                filtered_rows.append(row)
+        
+        deleted_count = original_count - len(filtered_rows)
+
+        with open(target_file_path, 'w', newline='', encoding='utf-8') as outfile:
+            writer = csv.writer(outfile)
+            writer.writerow(header)
+            writer.writerows(filtered_rows)
+
+        log_message(f"✅ Крок 7 завершено. Видалено {deleted_count} рядків. Залишилось {len(filtered_rows)}.", log_file_path)
+    except Exception as e:
+        log_message(f"❌ Виникла помилка під час видалення рядків: {e}", log_file_path)
+        return
+
+    # Крок 8: Додаємо дати в колонки 10 та 11 (колишній Крок 7)
+    try:
+        log_message("⚙️ Крок 8: Додаю дати в колонки 10 та 11...", log_file_path)
+        with open(target_file_path, 'r', newline='', encoding='utf-8') as infile:
+            reader = csv.reader(infile)
+            header = next(reader)
+            rows = list(reader)
+
+        today = datetime.now()
+        seven_days_later = today + timedelta(days=7)
+        
+        today_formatted = today.strftime("%Y-%m-%d 00:00:00")
+        seven_days_later_formatted = seven_days_later.strftime("%Y-%m-%d 00:00:00")
+        
+        updated_count = 0
+        for row in rows:
+            try:
+                if len(row) > 12 and row[12] and float(row[12]) > 0:
+                    if len(row) > 10:
+                        row[10] = today_formatted
+                    if len(row) > 11:
+                        row[11] = seven_days_later_formatted
+                    updated_count += 1
+            except (ValueError, IndexError):
+                continue
+
+        with open(target_file_path, 'w', newline='', encoding='utf-8') as outfile:
+            writer = csv.writer(outfile)
+            writer.writerow(header)
+            writer.writerows(rows)
+        
+        log_message(f"✅ Крок 8 завершено. Дати додано до {updated_count} рядків.", log_file_path)
+    except Exception as e:
+        log_message(f"❌ Виникла помилка під час додавання дат: {e}", log_file_path)
+        return
+        
+    # Крок 9: Копіюємо дані в файл zalishky_akcii.csv
+    try:
+        log_message("⚙️ Крок 9: Готую файл 'zalishky_akcii.csv'...", log_file_path)
+        
+        source_copy_file_path = os.path.join(base_dir, "csv", "process", "na_sait.csv")
+        target_copy_file_path = "/var/www/scripts/update/csv/output/zalishky_akcii.csv"
+        
+        # 9.1 Очищаємо файл
+        with open(target_copy_file_path, 'w', newline='', encoding='utf-8') as f:
+            pass
+
+        # 9.2 Копіюємо дані
+        with open(source_copy_file_path, 'r', newline='', encoding='utf-8') as infile, \
+             open(target_copy_file_path, 'w', newline='', encoding='utf-8') as outfile:
+
+            reader = csv.reader(infile)
+            writer = csv.writer(outfile)
+            
+            # Читаємо заголовок і визначаємо індекси колонок для копіювання
+            try:
+                header = next(reader)
+                columns_to_copy = [0, 1, 2, 9, 10, 11]
+                new_header = [header[i] for i in columns_to_copy if i < len(header)]
+                writer.writerow(new_header)
+            except StopIteration:
+                log_message("❌ Помилка: Вхідний файл 'na_sait.csv' порожній.", log_file_path)
+                return
+
+            copied_count = 0
+            for row in reader:
+                selected_columns = [row[i] for i in columns_to_copy if i < len(row)]
+                writer.writerow(selected_columns)
+                copied_count += 1
+        
+        log_message(f"✅ Крок 9 завершено. Скопійовано {copied_count} рядків в 'zalishky_akcii.csv'.", log_file_path)
+    except FileNotFoundError:
+        log_message(f"❌ Помилка: Вхідний або вихідний файл не знайдено: {e}", log_file_path)
+        return
+    except Exception as e:
+        log_message(f"❌ Виникла помилка під час копіювання в 'zalishky_akcii.csv': {e}", log_file_path)
+        return
+
+    log_message("🎉 Підготовка даних для сайту завершена!", log_file_path)
+    print("✅ Підготовка даних для сайту завершена.")
