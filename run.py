@@ -2,7 +2,7 @@ import argparse
 from scr.updater import check_version
 from scr.products import export_products, check_exported_csv, download_supplier_price_list, process_supplier_1_price_list, \
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
-                        prepare_for_website_upload
+                        prepare_for_website_upload, update_products
 def main():
     """
     Основна функція для обробки аргументів командного рядка та запуску відповідних функцій.
@@ -59,13 +59,19 @@ def main():
         action="store_true",
         help="Об'єднати всі прайси та залишки в одну зведену таблицю."
     )
-
     # Додаємо новий аргумент для підготовки файлу для завантаження
     parser.add_argument(
         "--prepare-upload",
         action="store_true",
         help="Підготувати файл для завантаження на сайт."
     )
+    # Додано новий аргумент для запуску функції оновлення товарів
+    parser.add_argument(
+        "--update-products",
+        action="store_true",
+        help="Оновити залишки та ціни товарів на сайті."
+    )
+
 
     # Сюди можна буде додати інші аргументи, наприклад, для імпорту
     # parser.add_argument(
@@ -105,6 +111,9 @@ def main():
     elif args.prepare_upload:
         print("⚙️ Запускаю підготовку файлу для завантаження на сайт...")
         prepare_for_website_upload()
+    elif args.update_products: # Додана нова умова для запуску
+        print("📦 Запускаю оновлення товарів на сайті...")
+        update_products()        
     # elif args.import_products:
     #     # print("📦 Запускаю імпорт товарів...")
     #     # import_products() # Цю функцію ми створимо пізніше

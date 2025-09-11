@@ -5,6 +5,7 @@ import time
 import requests
 import shutil
 import re
+import logging
 import pandas as pd
 import random # Новий імпорт
 from scr.updater import get_wc_api
@@ -24,6 +25,7 @@ def load_settings():
     except json.JSONDecodeError:
         print(f"❌ Помилка: файл конфігурації пошкоджений: {config_path}")
         return None
+
 
 def setup_log_file():
     """
@@ -47,12 +49,35 @@ def setup_log_file():
 
     return current_log_path
 
+
 def log_message(message, log_file_path=os.path.join(os.path.dirname(__file__), "..", "logs", "logs.log")):
     """
     Записує повідомлення в лог-файл.
     """
     with open(log_file_path, "a", encoding="utf-8") as log_file:
         log_file.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {message}\n")
+
+
+def update_log():
+    """
+    Налаштовує логування для дописування в logs.log.
+    Ця функція обходить логіку перейменування в setup_log_file.
+    """
+    log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+    log_file_path = os.path.join(log_dir, "logs.log")
+
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+
+    logging.basicConfig(
+        filename=log_file_path,
+        level=logging.INFO,
+        format='%(asctime)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        filemode='a'
+    )
+    
+    return log_file_path
 
 
 def export_products():
@@ -294,7 +319,6 @@ def check_exported_csv():
         print("✅ Перевірка завершена, помилок не знайдено.")
 
 
-
 def download_supplier_price_list(supplier_id):
     """
     Скачує прайс-лист від постачальника за його ID.
@@ -439,7 +463,6 @@ def process_supplier_1_price_list():
     log_message(f"🗑️ Видалено рядків: {skipped_rows}", log_file_path)
     log_message(f"✅ Оброблені рядки: {len(processed_rows) - 1}", log_file_path)
     print("✅ Обробка прайс-листа завершена. Деталі в лог-файлі.")
-
 
 
 def process_supplier_2_price_list():
@@ -1238,3 +1261,128 @@ def prepare_for_website_upload():
 
     log_message("🎉 Підготовка даних для сайту завершена!", log_file_path)
     print("✅ Підготовка даних для сайту завершена.")
+
+
+def update_products():
+    """
+    Оновлює дані про товар на сайті, використовуючи API.
+    Дані беруться з файлу zalishky_akcii.csv.
+    """
+    log_file_path = update_log()
+    
+    settings = load_settings()
+    if not settings:
+        log_message("❌ Неможливо завантажити налаштування. Перевірте файл.", log_file_path)
+        print("❌ Неможливо завантажити налаштування. Перевірте файл.")
+        return
+        
+    source_file_path = "/var/www/scripts/update/csv/output/zalishky_akcii.csv"
+    
+    url = settings.get("url")
+    consumer_key = settings.get("consumer_key")
+    consumer_secret = settings.get("consumer_secret")
+    
+    if not url or not consumer_key or not consumer_secret:
+        error_msg = "URL або ключі (consumer_key, consumer_secret) відсутні в налаштуваннях."
+        log_message(f"❌ {error_msg}", log_file_path)
+        print(f"❌ {error_msg}")
+        return
+
+    api_url = f"{url}/wp-json/wc/v3/products/batch"
+
+    start_time = time.time()
+    total_items = 0
+    updated_count = 0
+    error_count = 0
+
+    log_message("🚀 Початок оновлення товарів через API.", log_file_path)
+
+    try:
+        with open(source_file_path, 'r', newline='', encoding='utf-8') as infile:
+            reader = csv.DictReader(infile)
+            data_to_update = list(reader)
+            total_items = len(data_to_update)
+
+            log_message(f"🔎 Знайдено {total_items} товарів для оновлення.", log_file_path)
+
+            payloads = []
+            for row in data_to_update:
+                product_id = row.get('id')
+                
+                if not product_id:
+                    log_message(f"⚠️ Пропущено товар: не знайдено ID.", log_file_path)
+                    continue
+
+                regular_price = row.get('regular_price')
+                sale_price = row.get('sale_price')
+                stock_quantity = row.get('stock')
+                date_on_sale_from = row.get('date_on_sale_from')
+                date_on_sale_to = row.get('date_on_sale_to')
+                
+                # Перетворюємо порожні рядки цін на None
+                if not regular_price:
+                    regular_price = None
+                
+                if not sale_price:
+                    sale_price = None
+                    # Якщо акційна ціна відсутня, також видаляємо дати акції
+                    date_on_sale_from = None
+                    date_on_sale_to = None
+                
+                log_message(f"🔍 Готуємо товар ID {product_id}. Ціна: {regular_price} -> {sale_price}. Залишок: {stock_quantity}. Дати: {date_on_sale_from} - {date_on_sale_to}.", log_file_path)
+
+                payload = {
+                    "id": product_id,
+                    "regular_price": regular_price,
+                    "sale_price": sale_price,
+                    "stock_quantity": stock_quantity,
+                    "date_on_sale_from": date_on_sale_from,
+                    "date_on_sale_to": date_on_sale_to
+                }
+                payloads.append(payload)
+            
+            response = requests.post(api_url, json={"update": payloads}, auth=(consumer_key, consumer_secret))
+            response.raise_for_status()
+
+            result = response.json()
+            if 'update' in result:
+                updated_count = len(result['update'])
+                error_count = len(result.get('errors', []))
+                for error in result.get('errors', []):
+                    error_msg = f"❌ Помилка оновлення: {error.get('message', 'Невідома помилка')}"
+                    log_message(error_msg, log_file_path)
+                    print(error_msg)
+
+            status_message = f"✅ Оброблено {total_items} товарів."
+            log_message(status_message, log_file_path)
+            print(status_message)
+            
+    except FileNotFoundError:
+        error_msg = f"❌ Помилка: Файл '{source_file_path}' не знайдено."
+        print(error_msg)
+        log_message(error_msg, log_file_path)
+        error_count += total_items
+    except requests.exceptions.RequestException as e:
+        error_msg = f"❌ Помилка з'єднання або запиту: {e}"
+        print(error_msg)
+        log_message(error_msg, log_file_path)
+        error_count += total_items
+    except Exception as e:
+        error_msg = f"❌ Виникла невідома помилка під час завантаження: {e}"
+        print(error_msg)
+        log_message(error_msg, log_file_path)
+        error_count += total_items
+    finally:
+        end_time = time.time()
+        elapsed_time = int(end_time - start_time)
+        
+        print(f"🎉 Оновлення завершено. Оновлено {updated_count} товарів за {elapsed_time} сек.")
+        if error_count > 0:
+            print(f"⚠️ Завершено з {error_count} помилками. Детальніше в лог-файлі.")
+        
+        log_message(f"--- Підсумок оновлення ---", log_file_path)
+        log_message(f"Статус: {'Успішно' if error_count == 0 else 'Завершено з помилками'}", log_file_path)
+        log_message(f"Кількість товарів: {updated_count} з {total_items}", log_file_path)
+        log_message(f"Тривалість: {elapsed_time} сек.", log_file_path)
+        if error_count > 0:
+            log_message(f"Кількість помилок: {error_count}. Детальні помилки дивіться вище.", log_file_path)
