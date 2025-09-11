@@ -1,126 +1,54 @@
 import csv
-import json
 import os
 import time
 import requests
 import shutil
 import re
-import logging
 import pandas as pd
-import random # Новий імпорт
-from scr.updater import get_wc_api
+import random 
+import logging
+from scr.base_function import get_wc_api, load_settings, setup_log_file, log_message, update_log, setup_new_log_file, log_message_to_existing_file
 from datetime import datetime, timedelta
-
-def load_settings():
-    """
-    Завантаження конфігурації з settings.json
-    """
-    config_path = os.path.join(os.path.dirname(__file__), "..", "config", "settings.json")
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        print(f"❌ Помилка: файл конфігурації не знайдено за шляхом: {config_path}")
-        return None
-    except json.JSONDecodeError:
-        print(f"❌ Помилка: файл конфігурації пошкоджений: {config_path}")
-        return None
-
-
-def setup_log_file():
-    """
-    Перевіряє наявність logs.log, перейменовує його, якщо існує,
-    та повертає шлях до нового файлу.
-    """
-    log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    
-    current_log_path = os.path.join(log_dir, "logs.log")
-    
-    if os.path.exists(current_log_path):
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        new_log_path = os.path.join(log_dir, f"logs_{timestamp}.log")
-        try:
-            os.rename(current_log_path, new_log_path)
-            print(f"✅ Старий лог-файл перейменовано на {os.path.basename(new_log_path)}")
-        except OSError as e:
-            print(f"❌ Помилка при перейменуванні лог-файлу: {e}")
-            return current_log_path
-
-    return current_log_path
-
-
-def log_message(message, log_file_path=os.path.join(os.path.dirname(__file__), "..", "logs", "logs.log")):
-    """
-    Записує повідомлення в лог-файл.
-    """
-    with open(log_file_path, "a", encoding="utf-8") as log_file:
-        log_file.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {message}\n")
-
-
-def update_log():
-    """
-    Налаштовує логування для дописування в logs.log.
-    Ця функція обходить логіку перейменування в setup_log_file.
-    """
-    log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
-    log_file_path = os.path.join(log_dir, "logs.log")
-
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
-
-    logging.basicConfig(
-        filename=log_file_path,
-        level=logging.INFO,
-        format='%(asctime)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        filemode='a'
-    )
-    
-    return log_file_path
 
 
 def export_products():
     """
     Експорт усіх товарів у CSV пачками по 100.
     """
+    setup_new_log_file()
+    
     settings = load_settings()
-    if not settings:
+    if not settings or "paths" not in settings or "csv_path_zalishki" not in settings["paths"] or "headers_zvedena_name" not in settings or "export_fields" not in settings:
+        logging.error("❌ Не знайдено необхідні налаштування в settings.json. Експорт перервано.")
         return
         
-    log_file_path = setup_log_file()
+    csv_path = os.path.join(os.path.dirname(__file__), "..", settings["paths"]["csv_path_zalishki"])
     
-    csv_path = os.path.join(os.path.dirname(__file__), "..", "csv", "input", "zalishki.csv")
-    
-    headers = [
-        "ID", "Артикул", "Назва", "Опубліковано", "Запаси", "Звичайна ціна", "Категорії",
-        "Мета: shtrih_cod", "Мета: postachalnyk", "Мета: artykul_lutsk", "Мета: url_lutsk",
-        "Мета: artykul_blizklub", "Мета: url_blizklub",
-        "Мета: artykul_sexopt", "Мета: url_sexopt",
-        "Мета: artykul_biorytm", "Мета: url_biorytm",
-        "Мета: artykul_berdiansk"
-    ]
+    headers = [value for key, value in sorted(settings["headers_zvedena_name"].items(), key=lambda item: int(item[0]))]
 
-    wcapi = get_wc_api()
+    wcapi = get_wc_api(settings)
+    if not wcapi:
+        logging.error("❌ Не вдалося створити об'єкт WooCommerce API. Експорт перервано.")
+        return
+
     start_time = time.time()
     total_products = 0
     exported_count = 0
     errors = []
 
-    log_message("🚀 Початок експорту товарів.", log_file_path)
+    logging.info("🚀 Початок експорту товарів.")
 
     try:
         response = wcapi.get("products", params={"per_page": 1})
         if response.status_code != 200:
             error_msg = f"Помилка {response.status_code} при підрахунку товарів: {response.text}"
             print(f"❌ {error_msg}")
-            log_message(f"❌ {error_msg}", log_file_path)
+            logging.error(f"❌ {error_msg}")
             errors.append(error_msg)
             return
 
         total_products = int(response.headers.get("X-WP-Total", 0))
-        print(f"🔎 Загальна кількість товарів: {total_products}")
-        log_message(f"🔎 Загальна кількість товарів: {total_products}", log_file_path)
+        logging.info(f"🔎 Загальна кількість товарів: {total_products}")
 
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
@@ -133,43 +61,44 @@ def export_products():
                     params={
                         "per_page": 100,
                         "page": page,
-                        "_fields": "id,sku,name,status,stock_quantity,regular_price,categories,meta_data"
+                        "_fields": ",".join(settings["export_fields"][0:-1] + [",".join(settings["export_fields"][-1]["meta_data"])])
                     }
                 )
 
                 if response.status_code != 200:
                     error_msg = f"Помилка {response.status_code} на сторінці {page}: {response.text}"
                     print(f"❌ {error_msg}")
-                    log_message(f"❌ {error_msg}", log_file_path)
+                    logging.error(f"❌ {error_msg}")
                     errors.append(error_msg)
                     break
 
                 products = response.json()
                 if not products:
                     break
-
+                
+                # Створюємо словник для швидкого доступу до метаданих
+                meta_fields_to_export = settings["export_fields"][-1]["meta_data"]
+                
                 for product in products:
-                    product["meta_data_dict"] = {m["key"]: m["value"] for m in product.get("meta_data", [])}
-                    row = [
-                        product.get("id"),
-                        product.get("sku"),
-                        product.get("name"),
-                        "yes" if product.get("status") == "publish" else "no",
-                        product.get("stock_quantity"),
-                        product.get("regular_price"),
-                        ", ".join([cat["name"] for cat in product.get("categories", [])]),
-                        product["meta_data_dict"].get("shtrih_cod", ""),
-                        product["meta_data_dict"].get("postachalnyk", ""),
-                        product["meta_data_dict"].get("artykul_lutsk", ""),
-                        product["meta_data_dict"].get("url_lutsk", ""),
-                        product["meta_data_dict"].get("artykul_blizklub", ""),
-                        product["meta_data_dict"].get("url_blizklub", ""),
-                        product["meta_data_dict"].get("artykul_sexopt", ""),
-                        product["meta_data_dict"].get("url_sexopt", ""),
-                        product["meta_data_dict"].get("artykul_biorytm", ""),
-                        product["meta_data_dict"].get("url_biorytm", ""),
-                        product["meta_data_dict"].get("artykul_berdiansk", "")
-                    ]
+                    row = []
+                    # Додаємо стандартні поля
+                    for field in settings["export_fields"][0:-1]:
+                        if field == "status":
+                            row.append("yes" if product.get(field) == "publish" else "no")
+                        elif field == "categories":
+                            row.append(", ".join([cat["name"] for cat in product.get("categories", [])]))
+                        else:
+                            row.append(product.get(field, ""))
+                    
+                    # Додаємо поля метаданих
+                    for meta_field in meta_fields_to_export:
+                        meta_value = ""
+                        for meta_data_item in product.get("meta_data", []):
+                            if meta_data_item["key"] == meta_field:
+                                meta_value = meta_data_item["value"]
+                                break
+                        row.append(meta_value)
+                        
                     writer.writerow(row)
                     exported_count += 1
                 
@@ -177,7 +106,7 @@ def export_products():
                     elapsed = int(time.time() - start_time)
                     status_message = f"✅ Вивантажено {exported_count} з {total_products} ({elapsed} сек)"
                     print(status_message)
-                    log_message(status_message, log_file_path)
+                    logging.info(status_message)
 
                 page += 1
                 time.sleep(1)
@@ -185,7 +114,7 @@ def export_products():
     except Exception as e:
         error_msg = f"Виникла невідома помилка під час експорту: {e}"
         print(f"❌ {error_msg}")
-        log_message(f"❌ {error_msg}", log_file_path)
+        logging.error(f"❌ {error_msg}", exc_info=True)
         errors.append(error_msg)
     finally:
         end_time = time.time()
@@ -195,15 +124,15 @@ def export_products():
         if errors:
             print(f"⚠️ Експорт завершився з {len(errors)} помилками. Деталі в лог-файлі.")
         
-        log_message(f"--- Підсумок експорту ---", log_file_path)
-        log_message(f"Статус: {'Успішно' if not errors else 'Завершено з помилками'}", log_file_path)
-        log_message(f"Кількість товарів: {exported_count} з {total_products}", log_file_path)
-        log_message(f"Тривалість: {elapsed_time} сек.", log_file_path)
+        logging.info("--- Підсумок експорту ---")
+        logging.info(f"Статус: {'Успішно' if not errors else 'Завершено з помилками'}")
+        logging.info(f"Кількість товарів: {exported_count} з {total_products}")
+        logging.info(f"Тривалість: {elapsed_time} сек.")
         if errors:
-            log_message(f"Кількість помилок: {len(errors)}", log_file_path)
-            log_message("Перелік помилок:", log_file_path)
+            logging.info(f"Кількість помилок: {len(errors)}")
+            logging.info("Перелік помилок:")
             for err in errors:
-                log_message(f"- {err}", log_file_path)
+                logging.info(f"- {err}")
 
 
 def check_exported_csv():

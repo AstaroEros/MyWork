@@ -2,5 +2,5 @@
   "csv_input_path": "csv/input/",
   "csv_output_path": "csv/output/",
   "woocommerce_url": "https://myshop.com",
-  "woocommerce_key": "KEY_HERE",
+  "woocommerce_key": "KEY_HERE"
 }

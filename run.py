@@ -1,5 +1,5 @@
 import argparse
-from scr.updater import check_version
+from scr.base_function import check_version
 from scr.products import export_products, check_exported_csv, download_supplier_price_list, process_supplier_1_price_list, \
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
@@ -73,13 +73,6 @@ def main():
     )
 
 
-    # Сюди можна буде додати інші аргументи, наприклад, для імпорту
-    # parser.add_argument(
-    #     "--import-products", 
-    #     action="store_true", 
-    #     help="Імпортувати товари з файлів постачальників."
-    # )
-
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -111,12 +104,9 @@ def main():
     elif args.prepare_upload:
         print("⚙️ Запускаю підготовку файлу для завантаження на сайт...")
         prepare_for_website_upload()
-    elif args.update_products: # Додана нова умова для запуску
+    elif args.update_products: 
         print("📦 Запускаю оновлення товарів на сайті...")
         update_products()        
-    # elif args.import_products:
-    #     # print("📦 Запускаю імпорт товарів...")
-    #     # import_products() # Цю функцію ми створимо пізніше
     else:
         # Якщо аргументи не вказано, вивести довідку
         print("❌ Не вказано жодної дії. Використайте -h або --help для довідки.")
