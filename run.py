@@ -1,6 +1,6 @@
 import argparse
-from scr.base_function import check_version
-from scr.products import export_products, check_exported_csv, download_supplier_price_list, process_supplier_1_price_list, \
+from scr.base_function import check_version, check_csv_data
+from scr.products import export_products, download_supplier_price_list, process_supplier_1_price_list, \
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
 def main():
@@ -22,10 +22,11 @@ def main():
         help="Перевірити версію WooCommerce REST API."
     )
 
+    # Оновлений аргумент для перевірки CSV
     parser.add_argument(
         "--check-csv",
-        action="store_true",
-        help="Перевірити та відсортувати експортований CSV файл."
+        type=str,
+        help="Перевірити CSV-файл за ID профілю (наприклад, '1')."
     )
 
     parser.add_argument(
@@ -83,15 +84,19 @@ def main():
     elif args.check_version:
         print("🔍 Запускаю перевірку версії WooCommerce...")
         check_version()
-    elif args.check_csv:
-        print("⚙️ Запускаю перевірку експортованого CSV...")
-        check_exported_csv()
     elif args.download_supplier:
         print(f"🌐 Запускаю завантаження прайс-листа постачальника з ID {args.download_supplier}...")
         download_supplier_price_list(args.download_supplier)
     elif args.process_supplier_1:
         print("⚙️ Запускаю обробку прайс-листа постачальника 1...")
         process_supplier_1_price_list()
+        # Оновлена логіка для check-csv
+    elif args.check_csv:
+        print(f"⚙️ Запускаю перевірку CSV-файлу з профілем '{args.check_csv}'...")
+        if check_csv_data(args.check_csv):
+            print("✅ Перевірка успішна. Файл валідний.")
+        else:
+            print("❌ Перевірка не пройшла. Перегляньте лог-файл для деталей.")
     elif args.process_supplier_2:
         print("⚙️ Запускаю обробку прайс-листа постачальника 2...")
         process_supplier_2_price_list()

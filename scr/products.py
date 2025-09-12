@@ -13,18 +13,33 @@ from datetime import datetime, timedelta
 
 def export_products():
     """
-    Експорт усіх товарів у CSV пачками по 100.
+    Експорт усіх товарів у CSV пачками по 100, використовуючи поля з налаштувань.
     """
     setup_new_log_file()
-    
+
     settings = load_settings()
-    if not settings or "paths" not in settings or "csv_path_zalishki" not in settings["paths"] or "headers_zvedena_name" not in settings or "export_fields" not in settings:
-        logging.error("❌ Не знайдено необхідні налаштування в settings.json. Експорт перервано.")
+    if not settings or "paths" not in settings or "csv_path_zalishki" not in settings["paths"] or "export_fields" not in settings:
+        logging.error("❌ Не знайдено необхідні налаштування (шлях до CSV або поля експорту) в settings.json. Експорт перервано.")
         return
-        
+
     csv_path = os.path.join(os.path.dirname(__file__), "..", settings["paths"]["csv_path_zalishki"])
+
+    # Створення списку полів для запиту до API та заголовків для CSV
+    api_fields = []
+    csv_headers = []
+    meta_fields_for_api = []
     
-    headers = [value for key, value in sorted(settings["headers_zvedena_name"].items(), key=lambda item: int(item[0]))]
+    # Розділяємо поля на стандартні і метадані
+    for field in settings["export_fields"]:
+        if isinstance(field, str):
+            api_fields.append(field)
+            csv_headers.append(field)
+        elif isinstance(field, dict) and "meta_data" in field:
+            meta_fields_for_api = field["meta_data"]
+            api_fields.append("meta_data")
+            # Додаємо метадані до заголовків CSV з префіксом "Мета:"
+            for meta_field in meta_fields_for_api:
+                csv_headers.append(f"Мета: {meta_field}")
 
     wcapi = get_wc_api(settings)
     if not wcapi:
@@ -52,7 +67,7 @@ def export_products():
 
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(headers)
+            writer.writerow(csv_headers)
 
             page = 1
             while exported_count < total_products:
@@ -61,7 +76,7 @@ def export_products():
                     params={
                         "per_page": 100,
                         "page": page,
-                        "_fields": ",".join(settings["export_fields"][0:-1] + [",".join(settings["export_fields"][-1]["meta_data"])])
+                        "_fields": ",".join(api_fields)
                     }
                 )
 
@@ -76,29 +91,23 @@ def export_products():
                 if not products:
                     break
                 
-                # Створюємо словник для швидкого доступу до метаданих
-                meta_fields_to_export = settings["export_fields"][-1]["meta_data"]
-                
                 for product in products:
                     row = []
-                    # Додаємо стандартні поля
-                    for field in settings["export_fields"][0:-1]:
-                        if field == "status":
-                            row.append("yes" if product.get(field) == "publish" else "no")
-                        elif field == "categories":
-                            row.append(", ".join([cat["name"] for cat in product.get("categories", [])]))
-                        else:
-                            row.append(product.get(field, ""))
+                    # Заповнення рядка стандартними полями
+                    for field in settings["export_fields"]:
+                        if isinstance(field, str):
+                            if field == "status":
+                                row.append("yes" if product.get(field) == "publish" else "no")
+                            elif field == "categories":
+                                row.append(", ".join([cat["name"] for cat in product.get("categories", [])]))
+                            else:
+                                row.append(product.get(field, ""))
+                        # Заповнення метаданими
+                        elif isinstance(field, dict) and "meta_data" in field:
+                            meta_data_dict = {m["key"]: m["value"] for m in product.get("meta_data", [])}
+                            for meta_field in meta_fields_for_api:
+                                row.append(meta_data_dict.get(meta_field, ""))
                     
-                    # Додаємо поля метаданих
-                    for meta_field in meta_fields_to_export:
-                        meta_value = ""
-                        for meta_data_item in product.get("meta_data", []):
-                            if meta_data_item["key"] == meta_field:
-                                meta_value = meta_data_item["value"]
-                                break
-                        row.append(meta_value)
-                        
                     writer.writerow(row)
                     exported_count += 1
                 
