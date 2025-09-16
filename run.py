@@ -1,5 +1,5 @@
 import argparse
-from scr.base_function import check_version, check_csv_data
+from scr.base_function import check_version, check_csv_data, setup_logging
 from scr.products import export_products, download_supplier_price_list, process_supplier_1_price_list, \
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products

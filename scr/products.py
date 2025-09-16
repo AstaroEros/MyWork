@@ -518,7 +518,6 @@ def process_supplier_3_price_list():
     logging.info(f"✅ Оброблені рядки: {len(processed_rows) - 1}")
     print("✅ Обробка прайс-листа завершена. Деталі в лог-файлі.")
 
-
 def process_and_combine_all_data():
     """
     Обробляє прайс-листи та об'єднує дані у зведену таблицю csv/process/zvedena.csv.
