@@ -521,35 +521,48 @@ def process_supplier_3_price_list():
 
 def process_and_combine_all_data():
     """
-    Обробляє прайс-листи та об'єднує дані у зведену таблицю.
+    Обробляє прайс-листи та об'єднує дані у зведену таблицю csv/process/zvedena.csv.
     """
+    
+    # 0. Початкове налаштування та логування
+    log_message_to_existing_file()
+    logging.info("--- ⚙️ Запускаю повний процес обробки та об'єднання даних... ---")
+
+    # 1. Завантаження налаштувань та визначення шляхів
+    # Цей блок завантажує файл налаштувань settings.json і визначає всі необхідні шляхи до файлів.
     settings = load_settings()
     if not settings:
+        logging.error("❌ Не вдалося завантажити налаштування. Процес перервано.")
         return
 
     base_dir = os.path.join(os.path.dirname(__file__), "..")
-    log_file_path = os.path.join(base_dir, settings.get("log_file_path"))
     
-    zalishki_path = os.path.join(base_dir, settings.get("csv_path_zalishki"))
-    zvedena_path = os.path.join(base_dir, "csv", "process", "zvedena.csv")
+    # Використовуємо метод .get() з вкладеними ключами для безпечного доступу
+    paths = settings.get("paths", {})
+    suppliers = settings.get("suppliers", {})
+    
+    log_file_path = os.path.join(base_dir, paths.get("main_log_file"))
+    zalishki_path = os.path.join(base_dir, paths.get("csv_path_zalishki"))
+    zvedena_path = os.path.join(base_dir, paths.get("csv_path_zvedena"))
     
     # Інформація про постачальників
-    supplier_info_1 = settings.get("suppliers", {}).get("1")
+    supplier_info_1 = suppliers.get("1", {})
     supplier_csv_path_1 = os.path.join(base_dir, supplier_info_1.get("csv_path"))
     supplier_delimiter_1 = supplier_info_1.get("delimiter", ",")
     
-    supplier_info_2 = settings.get("suppliers", {}).get("2")
+    supplier_info_2 = suppliers.get("2", {})
     supplier_csv_path_2 = os.path.join(base_dir, supplier_info_2.get("csv_path"))
     supplier_delimiter_2 = supplier_info_2.get("delimiter", ",")
 
-    supplier_info_3 = settings.get("suppliers", {}).get("3")
+    supplier_info_3 = suppliers.get("3", {})
     supplier_csv_path_3 = os.path.join(base_dir, supplier_info_3.get("csv_name"))
     supplier_delimiter_3 = supplier_info_3.get("delimiter", ",")
     
-    supplier_info_4 = settings.get("suppliers", {}).get("4")
+    supplier_info_4 = suppliers.get("4", {})
     supplier_csv_path_4 = os.path.join(base_dir, supplier_info_4.get("csv_path"))
     supplier_delimiter_4 = supplier_info_4.get("delimiter", ",")
-
+    
+    # Додаткові налаштування
     zvedena_names_map = settings.get("column_zvedena_name")
     new_header = [zvedena_names_map.get(str(i)) for i in range(len(zvedena_names_map))]
     
@@ -570,107 +583,74 @@ def process_and_combine_all_data():
     supplier_4_columns = ["5", "4", "6"]
     supplier_4_match_column = "5"
     zvedena_match_column_4 = "1"
-
-    if not os.path.exists(zalishki_path):
-        log_message(f"❌ Файл залишків не знайдено: {zalishki_path}", log_file_path)
-        print("❌ Файл залишків не знайдено.")
-        return
-    if not os.path.exists(supplier_csv_path_1):
-        log_message(f"❌ Прайс-лист постачальника 1 не знайдено: {supplier_csv_path_1}", log_file_path)
-        print("❌ Прайс-лист постачальника 1 не знайдено.")
-        return
-    if not os.path.exists(supplier_csv_path_2):
-        log_message(f"❌ Прайс-лист постачальника 2 не знайдено: {supplier_csv_path_2}", log_file_path)
-        print("❌ Прайс-лист постачальника 2 не знайдено.")
-        return
-    if not os.path.exists(supplier_csv_path_3):
-        log_message(f"❌ Прайс-лист постачальника 3 не знайдено: {supplier_csv_path_3}", log_file_path)
-        print("❌ Прайс-лист постачальника 3 не знайдено.")
-        return
-    if not os.path.exists(supplier_csv_path_4):
-        log_message(f"❌ Прайс-лист постачальника 4 не знайдено: {supplier_csv_path_4}", log_file_path)
-        print("❌ Прайс-лист постачальника 4 не знайдено.")
-        return
-
-    log_message("⚙️ Запускаю повний процес обробки та об'єднання даних...", log_file_path)
     
+    # 2. Перевірка наявності всіх необхідних файлів
+    # Цей блок перевіряє, чи існують усі файли, перш ніж почати обробку.
+    required_files = {
+        "файл залишків": zalishki_path,
+        "прайс-лист постачальника 1": supplier_csv_path_1,
+        "прайс-лист постачальника 2": supplier_csv_path_2,
+        "прайс-лист постачальника 3": supplier_csv_path_3,
+        "прайс-лист постачальника 4": supplier_csv_path_4,
+    }
+
+    for file_name, path in required_files.items():
+        if not path or not os.path.exists(path):
+            logging.error(f"❌ Не знайдено {file_name} за шляхом: {path}. Процес зупинено.")
+            print(f"❌ Не знайдено {file_name}.")
+            return
+    
+    # 3. Видалення старого зведеного файлу (якщо існує)
     if os.path.exists(zvedena_path):
         try:
             os.remove(zvedena_path)
-            log_message(f"✅ Старий файл {os.path.basename(zvedena_path)} успішно видалено.", log_file_path)
+            logging.info(f"✅ Старий файл {os.path.basename(zvedena_path)} успішно видалено.")
         except OSError as e:
-            log_message(f"❌ Помилка при видаленні старого файлу: {e}", log_file_path)
+            logging.error(f"❌ Помилка при видаленні старого файлу: {e}", exc_info=True)
             print(f"❌ Помилка: {e}")
             return
     
-    supplier_data_dict_1 = {}
-    try:
-        with open(supplier_csv_path_1, "r", newline="", encoding="utf-8") as infile:
-            reader = csv.reader(infile, delimiter=supplier_delimiter_1)
-            next(reader) 
-            for row in reader:
-                if len(row) > max(int(col) for col in supplier_1_columns):
-                    key = row[int(supplier_1_match_column)].strip()
-                    values = [row[int(col)].strip() for col in supplier_1_columns]
-                    supplier_data_dict_1[key] = values
-    except Exception as e:
-        log_message(f"❌ Помилка при читанні прайс-листа постачальника 1: {e}", log_file_path)
-        print(f"❌ Помилка при читанні прайс-листа постачальника 1: {e}")
-        return
+    # 4. Завантаження даних постачальників у словники для швидкого доступу
+    # Кожен файл постачальника зчитується в пам'ять, щоб прискорити процес обробки.
+    supplier_data_dict = {}
+    supplier_list = [
+        ("1", supplier_csv_path_1, supplier_delimiter_1, supplier_1_columns, supplier_1_match_column),
+        ("2", supplier_csv_path_2, supplier_delimiter_2, supplier_2_columns, supplier_2_match_column),
+        ("3", supplier_csv_path_3, supplier_delimiter_3, supplier_3_columns, supplier_3_match_column),
+        ("4", supplier_csv_path_4, supplier_delimiter_4, supplier_4_columns, supplier_4_match_column)
+    ]
+    
+    for s_id, path, delimiter, columns, match_col in supplier_list:
+        try:
+            supplier_data_dict[s_id] = {}
+            with open(path, "r", newline="", encoding="utf-8") as infile:
+                reader = csv.reader(infile, delimiter=delimiter)
+                try:
+                    next(reader) 
+                except StopIteration:
+                    logging.warning(f"⚠️ Прайс-лист постачальника {s_id} порожній. Пропускаю завантаження.")
+                    continue
+                for row in reader:
+                    if len(row) > max(int(c) for c in columns):
+                        key = row[int(match_col)].strip()
+                        values = [row[int(c)].strip() for c in columns]
+                        supplier_data_dict[s_id][key] = values
+            logging.info(f"✅ Дані постачальника {s_id} успішно завантажено в пам'ять. Знайдено {len(supplier_data_dict[s_id])} унікальних записів.")
+        except Exception as e:
+            logging.error(f"❌ Помилка при читанні прайс-листа постачальника {s_id}: {e}", exc_info=True)
+            print(f"❌ Помилка при читанні прайс-листа постачальника {s_id}: {e}")
+            return
 
-    supplier_data_dict_2 = {}
-    try:
-        with open(supplier_csv_path_2, "r", newline="", encoding="utf-8") as infile:
-            reader = csv.reader(infile, delimiter=supplier_delimiter_2)
-            next(reader) 
-            for row in reader:
-                if len(row) > max(int(col) for col in supplier_2_columns):
-                    key = row[int(supplier_2_match_column)].strip()
-                    values = [row[int(col)].strip() for col in supplier_2_columns]
-                    supplier_data_dict_2[key] = values
-    except Exception as e:
-        log_message(f"❌ Помилка при читанні прайс-листа постачальника 2: {e}", log_file_path)
-        print(f"❌ Помилка при читанні прайс-листа постачальника 2: {e}")
-        return
-
-    supplier_data_dict_3 = {}
-    try:
-        with open(supplier_csv_path_3, "r", newline="", encoding="utf-8") as infile:
-            reader = csv.reader(infile, delimiter=supplier_delimiter_3)
-            next(reader) 
-            for row in reader:
-                if len(row) > max(int(col) for col in supplier_3_columns):
-                    key = row[int(supplier_3_match_column)].strip()
-                    values = [row[int(col)].strip() for col in supplier_3_columns]
-                    supplier_data_dict_3[key] = values
-    except Exception as e:
-        log_message(f"❌ Помилка при читанні прайс-листа постачальника 3: {e}", log_file_path)
-        print(f"❌ Помилка при читанні прайс-листа постачальника 3: {e}")
-        return
-
-    supplier_data_dict_4 = {}
-    try:
-        with open(supplier_csv_path_4, "r", newline="", encoding="utf-8") as infile:
-            reader = csv.reader(infile, delimiter=supplier_delimiter_4)
-            next(reader) 
-            for row in reader:
-                if len(row) > max(int(col) for col in supplier_4_columns):
-                    key = row[int(supplier_4_match_column)].strip()
-                    values = [row[int(col)].strip() for col in supplier_4_columns]
-                    supplier_data_dict_4[key] = values
-    except Exception as e:
-        log_message(f"❌ Помилка при читанні прайс-листа постачальника 4: {e}", log_file_path)
-        print(f"❌ Помилка при читанні прайс-листа постачальника 4: {e}")
-        return
-
+    # 5. Обробка основного файлу залишків та об'єднання даних
+    # Цей блок читає основний файл, додає до кожного рядка дані від постачальників
+    # та обчислює нові колонки, ігноруючи порожні або пошкоджені рядки.
     processed_rows = []
     processed_count = 0
     updated_by_s1_count = 0
     updated_by_s2_count = 0
     updated_by_s3_count = 0
     updated_by_s4_count = 0
-
-    # Визначаємо індекси колонок для формул згідно з вашими даними
+    
     formula_cols = {
         'N': 13, 'Q': 16, 'S': 18, 'V': 21,
         'M': 12, 'P': 15, 'T': 19, 'W': 22,
@@ -680,31 +660,42 @@ def process_and_combine_all_data():
         'G': 6,
         'Y': 24
     }
+    
+    suppliers_to_process = [
+        ("1", zvedena_match_column_1, updated_by_s1_count),
+        ("2", zvedena_match_column_2, updated_by_s2_count),
+        ("3", zvedena_match_column_3, updated_by_s3_count),
+        ("4", zvedena_match_column_4, updated_by_s4_count)
+    ]
 
     try:
         with open(zalishki_path, "r", newline="", encoding="utf-8") as infile:
             reader = csv.reader(infile)
-            next(reader)
-            
-            # Додаємо нові колонки з назвами з settings.json
+            try:
+                next(reader)
+            except StopIteration:
+                logging.warning("⚠️ Файл залишків порожній. Зведена таблиця буде створена лише із заголовком.")
+                
             processed_rows.append(new_header)
             
             for row in reader:
+                if not row or not any(row):
+                    continue
+                
                 processed_count += 1
                 if len(row) > 13:
                     new_row = [row[int(col_index)] for col_index in zalishki_columns]
                     
-                    supplier_data_1 = supplier_data_dict_1.get(new_row[int(zvedena_match_column_1)].strip(), ["", "", ""])
-                    supplier_data_2 = supplier_data_dict_2.get(new_row[int(zvedena_match_column_2)].strip(), ["", "", ""])
-                    supplier_data_3 = supplier_data_dict_3.get(new_row[int(zvedena_match_column_3)].strip(), ["", "", ""])
-                    supplier_data_4 = supplier_data_dict_4.get(new_row[int(zvedena_match_column_4)].strip(), ["", "", ""])
-                    
-                    new_row.extend(supplier_data_1)
-                    new_row.extend(supplier_data_2)
-                    new_row.extend(supplier_data_3)
-                    new_row.extend(supplier_data_4)
+                    for s_id, match_col, counter in suppliers_to_process:
+                        supplier_data = supplier_data_dict.get(s_id, {}).get(new_row[int(match_col)].strip(), ["", "", ""])
+                        new_row.extend(supplier_data)
+                        if supplier_data and supplier_data[0] != "":
+                            if s_id == "1": updated_by_s1_count += 1
+                            elif s_id == "2": updated_by_s2_count += 1
+                            elif s_id == "3": updated_by_s3_count += 1
+                            elif s_id == "4": updated_by_s4_count += 1
 
-                    # Обчислення для колонки 23: max(N, Q, S, V)
+                    # Обчислення для колонки 23
                     quantities_to_compare = []
                     for col_name in ['N', 'Q', 'S', 'V']:
                         try:
@@ -717,7 +708,7 @@ def process_and_combine_all_data():
                     max_quantity = max(quantities_to_compare) if quantities_to_compare else 0
                     new_row.append(str(max_quantity))
 
-                    # Обчислення для колонки 24: if((M + P + T + W) = 0; H; min(M; P; T; W))
+                    # Обчислення для колонки 24
                     quantities_for_sum = []
                     valid_quantities_for_min = []
                     
@@ -733,16 +724,16 @@ def process_and_combine_all_data():
                             quantities_for_sum.append(0)
                     
                     if sum(quantities_for_sum) == 0:
-                        result_24 = new_row[formula_cols['H']]
+                        try:
+                            result_24 = new_row[formula_cols['H']]
+                        except IndexError:
+                            result_24 = "0"
                     else:
-                        if valid_quantities_for_min:
-                            result_24 = min(valid_quantities_for_min)
-                        else:
-                            result_24 = 0
-
+                        result_24 = min(valid_quantities_for_min) if valid_quantities_for_min else 0
+                    
                     new_row.append(str(result_24))
 
-                    # Обчислення для колонки 25: if(I = "yes"; 1; 0)
+                    # Обчислення для колонки 25
                     try:
                         i_val = new_row[formula_cols['I']].strip().lower()
                     except IndexError:
@@ -751,7 +742,7 @@ def process_and_combine_all_data():
                     result_25 = 1 if i_val == "yes" else 0
                     new_row.append(str(result_25))
                     
-                    # Обчислення для колонки 26: IF((X - G) = 0; 0; 1)
+                    # Обчислення для колонки 26
                     x_val = 0
                     g_val = 0
                     try:
@@ -770,9 +761,9 @@ def process_and_combine_all_data():
                         result_26 = 1
                     
                     new_row.append(str(result_26))
-                    #log_message(f"рядок {processed_count}: X = \"{x_val}\", G = \"{g_val}\". (X - G) = \"{x_val - g_val}\". Результат для колонки 26 = \"{result_26}\"", log_file_path)
+                    logging.debug(f"рядок {processed_count}: X = \"{x_val}\", G = \"{g_val}\". (X - G) = \"{x_val - g_val}\". Результат для колонки 26 = \"{result_26}\"")
 
-                    # Обчислення для колонки 27: IF((Y - H) = 0; 0; 1)
+                    # Обчислення для колонки 27
                     y_val = 0
                     h_val = 0
                     try:
@@ -791,42 +782,53 @@ def process_and_combine_all_data():
                         result_27 = 1
                     
                     new_row.append(str(result_27))
-                    #log_message(f"рядок {processed_count}: Y = \"{y_val}\", H = \"{h_val}\". (Y - H) = \"{y_val - h_val}\". Результат для колонки 27 = \"{result_27}\"", log_file_path)
-
-                    if supplier_data_1[0] != "":
-                        updated_by_s1_count += 1
-                    if supplier_data_2[0] != "":
-                        updated_by_s2_count += 1
-                    if supplier_data_3[0] != "":
-                        updated_by_s3_count += 1
-                    if supplier_data_4[0] != "":
-                        updated_by_s4_count += 1
+                    logging.debug(f"рядок {processed_count}: Y = \"{y_val}\", H = \"{h_val}\". (Y - H) = \"{y_val - h_val}\". Результат для колонки 27 = \"{result_27}\"")
                     
                     processed_rows.append(new_row)
+                else:
+                    logging.warning(f"⚠️ Пропущено рядок {processed_count} через недостатню кількість колонок.")
     
     except Exception as e:
-        log_message(f"❌ Виникла помилка під час обробки даних: {e}", log_file_path)
+        logging.error(f"❌ Виникла помилка під час обробки даних: {e}", exc_info=True)
         print(f"❌ Виникла помилка під час обробки даних: {e}")
         return
 
+    # 6. Сортування та збереження даних у зведений файл CSV
+    # Цей блок сортує оброблені дані та записує їх у новий файл,
+    # перевіряючи, чи є дані для запису.
     try:
-        with open(zvedena_path, "w", newline="", encoding="utf-8") as outfile:
-            writer = csv.writer(outfile)
-            writer.writerows(processed_rows)
+        if len(processed_rows) <= 1:
+            logging.warning("⚠️ Немає даних для запису, крім заголовка.")
+            print("⚠️ Немає даних для запису, крім заголовка. Файл не буде створено.")
+            return
 
-        log_message("🎉 Повний процес обробки та об'єднання завершено!", log_file_path)
-        log_message(f"--- Підсумок: ---", log_file_path)
-        log_message(f"📦 Всього рядків у файлі залишків: {processed_count}", log_file_path)
-        log_message(f"✅ Оновлено даними постачальника 1: {updated_by_s1_count} рядків.", log_file_path)
-        log_message(f"✅ Оновлено даними постачальника 2: {updated_by_s2_count} рядків.", log_file_path)
-        log_message(f"✅ Оновлено даними постачальника 3: {updated_by_s3_count} рядків.", log_file_path)
-        log_message(f"✅ Оновлено даними постачальника 4: {updated_by_s4_count} рядків.", log_file_path)
-        log_message(f"📄 Створено зведених рядків: {len(processed_rows) - 1}", log_file_path)
+        # Сортування за колонкою B (індекс 1)
+        # Спочатку видаляємо заголовок, сортуємо, а потім додаємо його назад.
+        header = processed_rows[0]
+        data_rows = processed_rows[1:]
+        data_rows.sort(key=lambda row: int(row[1]))
+        sorted_rows = [header] + data_rows
+
+        with open(zvedena_path, "w", newline="", encoding="utf-8") as outfile:
+            writer = csv.writer(outfile, delimiter=',')
+            writer.writerows(sorted_rows)
+
+        logging.info("--- 🎉 Повний процес обробки та об'єднання завершено! ---")
+        logging.info("--- Підсумок: ---")
+        logging.info(f"📦 Всього рядків у файлі залишків: {processed_count}")
+        logging.info(f"✅ Оновлено даними постачальника 1: {updated_by_s1_count} рядків.")
+        logging.info(f"✅ Оновлено даними постачальника 2: {updated_by_s2_count} рядків.")
+        logging.info(f"✅ Оновлено даними постачальника 3: {updated_by_s3_count} рядків.")
+        logging.info(f"✅ Оновлено даними постачальника 4: {updated_by_s4_count} рядків.")
+        logging.info(f"📄 Створено зведених рядків: {len(processed_rows) - 1}")
         print("✅ Повний процес обробки завершено. Деталі в лог-файлі.")
 
     except Exception as e:
-        log_message(f"❌ Помилка при збереженні зведеної таблиці: {e}", log_file_path)
+        logging.error(f"❌ Помилка при збереженні зведеної таблиці: {e}", exc_info=True)
         print(f"❌ Помилка: {e}")
+
+
+
 
 
 def prepare_for_website_upload():
