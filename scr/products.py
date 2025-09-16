@@ -7,7 +7,7 @@ import re
 import pandas as pd
 import random 
 import logging
-from scr.base_function import get_wc_api, load_settings, setup_log_file, log_message, update_log, setup_new_log_file, log_message_to_existing_file
+from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log_message_to_existing_file
 from datetime import datetime, timedelta
 
 
@@ -143,164 +143,58 @@ def export_products():
             for err in errors:
                 logging.info(f"- {err}")
 
-
-def check_exported_csv():
-    """
-    Перевіряє і очищає дані в експортованому CSV файлі.
-    """
-    settings = load_settings()
-    if not settings:
-        return
-
-    csv_path = os.path.join(os.path.dirname(__file__), "..", "csv", "input", "zalishki.csv")
-    if not os.path.exists(csv_path):
-        print("❌ Файл експорту не знайдено.")
-        return
-
-    log_file_path = os.path.join(os.path.dirname(__file__), "..", "logs", "logs.log")
-    log_message("🔍 Початок перевірки експортованого CSV.", log_file_path)
-
-    temp_file_path = f"{csv_path}.temp"
-    validation_errors = []
-    processed_rows = []
-
-    try:
-        with open(csv_path, "r", newline="", encoding="utf-8") as infile:
-            reader = csv.reader(infile)
-            headers = next(reader)
-            
-            row_number = 1
-            for row in reader:
-                row_number += 1
-                row_id = row[0] if len(row) > 0 else "Невідомий ID"
-
-                # Перевірка та очищення колонки 1 (ID)
-                try:
-                    int(row[0])
-                except (ValueError, IndexError):
-                    validation_errors.append(f"❌ Рядок {row_number}, ID {row_id}: Колонка 1 (ID) не є цілим числом. Значення: '{row[0]}'")
-                
-                # Перевірка та очищення колонки 2 (Артикул)
-                try:
-                    int(row[1])
-                except (ValueError, IndexError):
-                    validation_errors.append(f"❌ Рядок {row_number}, ID {row_id}: Колонка 2 (Артикул) не є цілим числом. Значення: '{row[1]}'")
-                
-                 # Перевірка колонки 3 (Назва)
-                if len(row) > 2 and not row[2].strip():
-                    validation_errors.append(f"❌ Рядок {row_number}, ID {row_id}: Колонка 3 (Назва) не може бути пустою.")
-
-                # Перевірка та очищення колонки 4 (Опубліковано)
-                if len(row) > 3 and row[3].lower() not in ["yes", "no"]:
-                    validation_errors.append(f"❌ Рядок {row_number}, ID {row_id}: Колонка 4 (Опубліковано) очікує 'yes' або 'no'. Значення: '{row[3]}'")
-                
-                # Перевірка та очищення колонки 5 (Запаси)
-                if len(row) > 4:
-                    if row[4] == "":
-                        row[4] = "0"
-                        log_message(f"ℹ️ Рядок {row_number}, ID {row_id}: Колонка 5 (Запаси) була пустою, встановлено значення '0'.", log_file_path)
-                    try:
-                        int(row[4])
-                    except ValueError:
-                        validation_errors.append(f"❌ Рядок {row_number}, ID {row_id}: Колонка 5 (Запаси) не є цілим числом. Значення: '{row[4]}'")
-                
-                # Перевірка та очищення колонки 6 (Звичайна ціна)
-                try:
-                    int(row[5])
-                except (ValueError, IndexError):
-                    validation_errors.append(f"❌ Рядок {row_number}, ID {row_id}: Колонка 6 (Звичайна ціна) не є цілим числом. Значення: '{row[5]}'")
-                
-                # Перевірка колонки 7 (Категорії)
-                if len(row) > 6 and not row[6].strip():
-                    validation_errors.append(f"❌ Рядок {row_number}, ID {row_id}: Колонка 7 (Категорії) не може бути пустою.")
-
-                # Очищення колонки 9 (Постачальник)
-                if len(row) > 8:
-                    row[8] = row[8].replace("[", "").replace("'", "").replace("]", "")
-                
-                # Очищення колонок 11, 13, 15, 17
-                for i in [10, 12, 14, 16]:
-                    if len(row) > i:
-                        row[i] = row[i].replace("{'title': '', 'url': '", "").replace("', 'target': ''}", "")
-                
-                processed_rows.append(row)
-    
-    except Exception as e:
-        print(f"❌ Виникла помилка під час перевірки файлу: {e}")
-        log_message(f"❌ Виникла помилка під час перевірки файлу: {e}", log_file_path)
-        return
-
-    # Запис відсортованого та очищеного файлу
-    print("⏳ Сортую дані та записую оновлений файл...")
-    try:
-        processed_rows.sort(key=lambda x: int(x[0]))
-    except (ValueError, IndexError) as e:
-        print(f"❌ Помилка сортування: неможливо перетворити ID на число. {e}")
-        log_message(f"❌ Помилка сортування: неможливо перетворити ID на число. {e}", log_file_path)
-
-    with open(temp_file_path, "w", newline="", encoding="utf-8") as outfile:
-        writer = csv.writer(outfile)
-        writer.writerow(headers)
-        writer.writerows(processed_rows)
-
-    os.replace(temp_file_path, csv_path)
-
-    # Логування результатів
-    log_message("🎉 Перевірку та очищення файлу завершено.", log_file_path)
-    if validation_errors:
-        log_message(f"⚠️ Знайдено {len(validation_errors)} помилок:", log_file_path)
-        for error in validation_errors:
-            log_message(error, log_file_path)
-        print(f"⚠️ Знайдено {len(validation_errors)} помилок. Деталі в лог-файлі.")
-    else:
-        log_message("✅ Всі дані коректні. Помилок не знайдено.", log_file_path)
-        print("✅ Перевірка завершена, помилок не знайдено.")
-
-
 def download_supplier_price_list(supplier_id):
     """
     Скачує прайс-лист від постачальника за його ID.
     """
+    # 0. Налаштування логування для дописування
+    log_message_to_existing_file()
+
+    # 1. Завантаження налаштувань
     settings = load_settings()
     if not settings:
+        logging.error("❌ Не вдалося завантажити налаштування. Скачування прайс-листа перервано.")
         return
     
+    # 2. Отримання інформації про постачальника
     supplier_info = settings.get("suppliers", {}).get(str(supplier_id))
     if not supplier_info:
-        print(f"❌ Помилка: Інформацію про постачальника з ID '{supplier_id}' не знайдено.")
+        logging.error(f"❌ Помилка: Інформацію про постачальника з ID '{supplier_id}' не знайдено.")
         return
 
+    # 3. Визначення шляхів
     base_dir = os.path.join(os.path.dirname(__file__), "..")
-    log_file_path = os.path.join(base_dir, settings.get("log_file_path"))
-    
     url = supplier_info.get("download_url")
     csv_path = os.path.join(base_dir, supplier_info.get("csv_path"))
-   
-    log_message(f"⏳ Запускаю завантаження прайс-листа від {supplier_id} (ID: {supplier_id}).", log_file_path)
 
-    # Видалення старого файлу, якщо він існує
+    if not url or not csv_path:
+        logging.error(f"❌ Неповні дані про постачальника '{supplier_id}'. Відсутній URL або шлях.")
+        return
+    
+    logging.info(f"⏳ Запускаю завантаження прайс-листа від постачальника (ID: {supplier_id}).")
+
+    # 4. Видалення старого файлу
     if os.path.exists(csv_path):
         try:
             os.remove(csv_path)
-            log_message(f"✅ Старий файл {os.path.basename(csv_path)} успішно видалено.", log_file_path)
+            # Оновлена логіка: використовуємо ID постачальника замість назви файлу
+            logging.info(f"✅ Старий прайс-лист від постачальника (ID: {supplier_id}) успішно видалено.")
         except OSError as e:
-            log_message(f"❌ Помилка при видаленні старого файлу: {e}", log_file_path)
-            print(f"❌ Помилка: {e}")
+            logging.error(f"❌ Помилка при видаленні старого файлу: {e}")
             return
     
+    # 5. Завантаження нового файлу
     try:
-        # Завантаження файлу
         with requests.get(url, stream=True) as r:
             r.raise_for_status()
             with open(csv_path, 'wb') as f:
                 shutil.copyfileobj(r.raw, f)
         
-        log_message(f"🎉 Прайс-лист від {supplier_id} успішно завантажено.", log_file_path)
-        print(f"✅ Прайс-лист від {supplier_id} успішно завантажено.")
+        logging.info(f"🎉 Прайс-лист від постачальника (ID: {supplier_id}) успішно завантажено.")
     except requests.exceptions.RequestException as e:
-        log_message(f"❌ Помилка завантаження файлу від {supplier_id}: {e}", log_file_path)
-        print(f"❌ Помилка завантаження файлу: {e}")
-
+        logging.error(f"❌ Помилка завантаження файлу від постачальника (ID: {supplier_id}): {e}", exc_info=True)
+    except Exception as e:
+        logging.error(f"❌ Виникла невідома помилка під час завантаження: {e}", exc_info=True)
 
 def process_supplier_1_price_list():
     """
