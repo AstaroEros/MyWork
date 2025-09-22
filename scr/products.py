@@ -831,6 +831,8 @@ def prepare_for_website_upload():
     Готує дані зі зведеної таблиці для завантаження на сайт,
     виконуючи кожен крок окремо з записом у файл.
     """
+    # 0. Налаштування логування для дописування
+    log_message_to_existing_file()
     settings = load_settings()
     if not settings:
         logging.error("❌ Не вдалося завантажити налаштування. Процес перервано.")
@@ -852,7 +854,7 @@ def prepare_for_website_upload():
         logging.error(f"❌ Помилка при очищенні файлу {os.path.basename(intermediate_file_path)}: {e}")
         return
 
-    # Крок 2: Копіюємо колонки 1, 23-30 із zvedena.csv
+    # Крок 2: Копіюємо необхідні колонки, включаючи id (колонка 0), замість SKU
     try:
         logging.info("⚙️ Крок 2: Копіюю дані зі 'zvedena.csv'...")
         with open(source_file_path, 'r', newline='', encoding='utf-8') as infile, \
@@ -863,7 +865,9 @@ def prepare_for_website_upload():
             
             try:
                 header = next(reader)
-                columns_to_copy = [1] + list(range(23, min(31, len(header))))
+                
+                # Замінюємо копіювання SKU (колонка 1) на ID (колонка 0)
+                columns_to_copy = [0] + list(range(23, min(31, len(header))))
                 new_header = [header[i] for i in columns_to_copy]
                 writer.writerow(new_header)
             except StopIteration:
@@ -871,8 +875,9 @@ def prepare_for_website_upload():
                 return
             
             copied_count = 0
-            for i, row in enumerate(reader):
-                selected_columns = [row[1]] if len(row) > 1 else [""]
+            for row in reader:
+                # Копіюємо тільки id та колонки з 23 по 30
+                selected_columns = [row[0]] if len(row) > 0 else [""]
                 
                 for j in range(23, 31):
                     if j < len(row):
@@ -892,7 +897,7 @@ def prepare_for_website_upload():
         logging.error(f"❌ Виникла помилка під час копіювання: {e}")
         return
 
-    # Крок 3: Додаємо 4 нові колонки з назвами
+    # Крок 3: Додаємо 4 нові колонки з назвами в кінець
     try:
         logging.info("⚙️ Крок 3: Додаю 4 нові колонки...")
         with open(intermediate_file_path, 'r', newline='', encoding='utf-8') as infile:
@@ -923,7 +928,8 @@ def prepare_for_website_upload():
             rows = list(reader)
 
         original_count = len(rows)
-        filtered_rows = [row for row in rows if row[3] != "0"]
+        # Колонка 'stock_status' тепер має індекс 3 (раніше була 25)
+        filtered_rows = [row for row in rows if len(row) > 3 and row[3] != "0"]
         deleted_count = original_count - len(filtered_rows)
 
         with open(intermediate_file_path, 'w', newline='', encoding='utf-8') as outfile:
@@ -936,7 +942,7 @@ def prepare_for_website_upload():
         logging.error(f"❌ Виникла помилка під час видалення рядків: {e}")
         return
 
-    # Крок 5: Заповнюємо колонку з індексом 12 рандомними значеннями
+    # Крок 5: Заповнюємо колонку з індексом 12 ("Знижка%") рандомними значеннями
     try:
         logging.info("⚙️ Крок 5: Заповнюю колонку 12 рандомними значеннями...")
         with open(intermediate_file_path, 'r', newline='', encoding='utf-8') as infile:
@@ -950,11 +956,14 @@ def prepare_for_website_upload():
         updated_count = 0
         for row in rows:
             try:
-                if len(row) > 2 and float(row[1]) > 0 and float(row[2].replace(',', '.')) > 800:
+                # 'stock_quantity' тепер індекс 1, 'regular_price' - індекс 2
+                if len(row) > 2 and row[1] and float(row[1]) > 0 and row[2] and float(row[2].replace(',', '.')) > 800:
                     random_value = random.choices(random_choices, weights=weights, k=1)[0]
-                    row[12] = str(random_value)
-                    if random_value > 0:
-                        updated_count += 1
+                    # 'Знижка%' тепер індекс 12
+                    if len(row) > 12:
+                        row[12] = str(random_value)
+                        if random_value > 0:
+                            updated_count += 1
             except (ValueError, IndexError):
                 continue
         
@@ -968,7 +977,7 @@ def prepare_for_website_upload():
         logging.error(f"❌ Виникла помилка під час заповнення: {e}")
         return
 
-    # Крок 6: Заповнюємо колонку з індексом 9 за формулою
+    # Крок 6: Заповнюємо колонку з індексом 9 ("sale_price") за формулою
     try:
         logging.info("⚙️ Крок 6: Заповнюю колонку 9 за формулою...")
         with open(intermediate_file_path, 'r', newline='', encoding='utf-8') as infile:
@@ -979,17 +988,22 @@ def prepare_for_website_upload():
         updated_count = 0
         for row in rows:
             try:
-                c_val = float(row[2].replace(',', '.') if row[2] else 0)
-                m_val = float(row[12]) if row[12] else 0
+                # 'regular_price' тепер індекс 2, 'Знижка%' - індекс 12
+                c_val = float(row[2].replace(',', '.') if len(row) > 2 and row[2] else 0)
+                m_val = float(row[12] if len(row) > 12 and row[12] else 0)
                 
                 if m_val > 0:
                     result = round(c_val * (100 - m_val) / 100, 0)
-                    row[9] = str(int(result))
-                    updated_count += 1
+                    # 'sale_price' тепер індекс 9
+                    if len(row) > 9:
+                        row[9] = str(int(result))
+                        updated_count += 1
                 else:
-                    row[9] = ""
+                    if len(row) > 9:
+                        row[9] = ""
             except (ValueError, IndexError):
-                row[9] = ""
+                if len(row) > 9:
+                    row[9] = ""
                 continue
         
         with open(intermediate_file_path, 'w', newline='', encoding='utf-8') as outfile:
@@ -1014,7 +1028,8 @@ def prepare_for_website_upload():
         
         filtered_rows = []
         for row in rows:
-            if not (row[9] == "" and row[4] == "0" and row[5] == "0"):
+            # 'sale_price' тепер індекс 9, а 'tax_class' та 'visibility' - індекси 4 та 5
+            if not (len(row) > 9 and row[9] == "" and len(row) > 5 and row[4] == "0" and row[5] == "0"):
                 filtered_rows.append(row)
         
         deleted_count = original_count - len(filtered_rows)
@@ -1046,7 +1061,9 @@ def prepare_for_website_upload():
         updated_count = 0
         for row in rows:
             try:
+                # 'Знижка%' тепер індекс 12
                 if len(row) > 12 and row[12] and float(row[12]) > 0:
+                    # Нові колонки 'sale_price_dates_from' та 'sale_price_dates_to' - індекси 10 та 11
                     if len(row) > 10:
                         row[10] = today_formatted
                     if len(row) > 11:
@@ -1065,7 +1082,7 @@ def prepare_for_website_upload():
         logging.error(f"❌ Виникла помилка під час додавання дат: {e}")
         return
         
-   # Крок 9: Розділяємо дані на два вихідні файли
+    # Крок 9: Розділяємо дані на два вихідні файли
     try:
         logging.info("⚙️ Крок 9: Створюю два окремі файли для оновлення...")
         
@@ -1084,10 +1101,9 @@ def prepare_for_website_upload():
             reader = csv.reader(infile)
             
             # Визначаємо колонки для кожного файлу
-            zalishky_cols = [0, 1, 2] # sku, stock_quantity, regular_price
-            akcii_cols = [0, 9, 10, 11] # sku, sale_price, sale_price_dates_from, sale_price_dates_to
+            zalishky_cols = [0, 1, 2]  # ID, stock_quantity, regular_price
+            akcii_cols = [0, 9, 10, 11] # ID, sale_price, sale_price_dates_from, sale_price_dates_to
 
-            # Створення нових заголовків
             try:
                 header = next(reader)
             except StopIteration:
@@ -1095,7 +1111,9 @@ def prepare_for_website_upload():
                 return
 
             zalishky_header = [header[i] for i in zalishky_cols]
-            akcii_header = [header[i] for i in akcii_cols]
+            
+            # Використовуємо коректні назви заголовків для акцій
+            akcii_header = ["id", "sale_price", "date_on_sale_from", "date_on_sale_to"]
 
             with open(zalishky_output_path, 'w', newline='', encoding='utf-8') as zalishky_outfile:
                 zalishky_writer = csv.writer(zalishky_outfile)
@@ -1115,7 +1133,8 @@ def prepare_for_website_upload():
                         copied_zalishky_count += 1
                         
                         # Копіюємо дані в файл акцій, тільки якщо є значення в колонці sale_price
-                        if row[9]:
+                        # 'sale_price' тепер індекс 9
+                        if len(row) > 9 and row[9]:
                             akcii_row = [row[i] for i in akcii_cols]
                             akcii_writer.writerow(akcii_row)
                             copied_akcii_count += 1
@@ -1131,29 +1150,45 @@ def prepare_for_website_upload():
     logging.info("🎉 Підготовка даних для сайту завершена!")
     print("✅ Підготовка даних для сайту завершена.")
 
-
-def update_products():
+def update_products(update_type):
     """
-    Оновлює дані про товар на сайті, використовуючи API.
-    Дані беруться з файлу zalishky_akcii.csv.
+    Оновлює залишки, ціни або акції товарів на сайті, використовуючи API.
+    Тип оновлення залежить від вхідного аргументу:
+    1: Оновлює залишки та ціни з файлу zalishky.csv.
+    2: Оновлює акційні ціни з файлу akcii.csv.
     """
-    log_file_path = update_log()
-    
+    # 0. Налаштування логування для дописування
+    log_message_to_existing_file()
     settings = load_settings()
     if not settings:
-        log_message("❌ Неможливо завантажити налаштування. Перевірте файл.", log_file_path)
+        logging.error("❌ Неможливо завантажити налаштування. Перевірте файл.")
         print("❌ Неможливо завантажити налаштування. Перевірте файл.")
         return
-        
-    source_file_path = "/var/www/scripts/update/csv/output/zalishky_akcii.csv"
-    
+
+    base_dir = "/var/www/scripts/update/csv/output"
+
+    # Вибір файлу та ключів для оновлення залежно від типу
+    if update_type == '1':
+        source_file_path = os.path.join(base_dir, "zalishky.csv")
+        payload_keys = ['stock_quantity', 'regular_price']
+        log_message = "залишків та цін"
+    elif update_type == '2':
+        source_file_path = os.path.join(base_dir, "akcii.csv")
+        payload_keys = ['sale_price', 'date_on_sale_from', 'date_on_sale_to']
+        log_message = "акцій"
+    else:
+        error_msg = "❌ Некоректний тип оновлення. Використовуйте '1' для залишків/цін або '2' для акцій."
+        logging.error(error_msg)
+        print(error_msg)
+        return
+
     url = settings.get("url")
     consumer_key = settings.get("consumer_key")
     consumer_secret = settings.get("consumer_secret")
-    
+
     if not url or not consumer_key or not consumer_secret:
         error_msg = "URL або ключі (consumer_key, consumer_secret) відсутні в налаштуваннях."
-        log_message(f"❌ {error_msg}", log_file_path)
+        logging.error(f"❌ {error_msg}")
         print(f"❌ {error_msg}")
         return
 
@@ -1164,52 +1199,39 @@ def update_products():
     updated_count = 0
     error_count = 0
 
-    log_message("🚀 Початок оновлення товарів через API.", log_file_path)
+    logging.info(f"🚀 Початок оновлення {log_message} товарів через API.")
 
     try:
+        if not os.path.exists(source_file_path):
+            raise FileNotFoundError(f"Файл '{os.path.basename(source_file_path)}' не знайдено.")
+
         with open(source_file_path, 'r', newline='', encoding='utf-8') as infile:
             reader = csv.DictReader(infile)
             data_to_update = list(reader)
             total_items = len(data_to_update)
 
-            log_message(f"🔎 Знайдено {total_items} товарів для оновлення.", log_file_path)
+        logging.info(f"🔎 Знайдено {total_items} товарів у файлі '{os.path.basename(source_file_path)}' для оновлення.")
 
-            payloads = []
-            for row in data_to_update:
-                product_id = row.get('id')
-                
-                if not product_id:
-                    log_message(f"⚠️ Пропущено товар: не знайдено ID.", log_file_path)
-                    continue
-
-                regular_price = row.get('regular_price')
-                sale_price = row.get('sale_price')
-                stock_quantity = row.get('stock')
-                date_on_sale_from = row.get('date_on_sale_from')
-                date_on_sale_to = row.get('date_on_sale_to')
-                
-                # Перетворюємо порожні рядки цін на None
-                if not regular_price:
-                    regular_price = None
-                
-                if not sale_price:
-                    sale_price = None
-                    # Якщо акційна ціна відсутня, також видаляємо дати акції
-                    date_on_sale_from = None
-                    date_on_sale_to = None
-                
-                log_message(f"🔍 Готуємо товар ID {product_id}. Ціна: {regular_price} -> {sale_price}. Залишок: {stock_quantity}. Дати: {date_on_sale_from} - {date_on_sale_to}.", log_file_path)
-
-                payload = {
-                    "id": product_id,
-                    "regular_price": regular_price,
-                    "sale_price": sale_price,
-                    "stock_quantity": stock_quantity,
-                    "date_on_sale_from": date_on_sale_from,
-                    "date_on_sale_to": date_on_sale_to
-                }
-                payloads.append(payload)
+        payloads = []
+        for i, row in enumerate(data_to_update, 1):
+            product_id = row.get('id')
             
+            if not product_id:
+                logging.warning(f"⚠️ Рядок {i}: пропущено, не знайдено 'id'.")
+                continue
+
+            # Формуємо payload динамічно, використовуючи надані ключі
+            payload = {"id": product_id}
+            for key in payload_keys:
+                if key in row:
+                    payload[key] = row.get(key)
+                else:
+                    logging.warning(f"⚠️ Рядок {i} (ID: {product_id}): не знайдено колонку '{key}'.")
+
+            payloads.append(payload)
+
+        # Відправляємо оновлення пачками
+        if payloads:
             response = requests.post(api_url, json={"update": payloads}, auth=(consumer_key, consumer_secret))
             response.raise_for_status()
 
@@ -1219,39 +1241,41 @@ def update_products():
                 error_count = len(result.get('errors', []))
                 for error in result.get('errors', []):
                     error_msg = f"❌ Помилка оновлення: {error.get('message', 'Невідома помилка')}"
-                    log_message(error_msg, log_file_path)
+                    logging.error(error_msg)
                     print(error_msg)
+        else:
+            logging.info("ℹ️ Немає даних для оновлення. Операція пропущена.")
 
-            status_message = f"✅ Оброблено {total_items} товарів."
-            log_message(status_message, log_file_path)
-            print(status_message)
-            
-    except FileNotFoundError:
-        error_msg = f"❌ Помилка: Файл '{source_file_path}' не знайдено."
+        status_message = f"✅ Оброблено {len(payloads)} товарів."
+        logging.info(status_message)
+        print(status_message)
+
+    except FileNotFoundError as e:
+        error_msg = f"❌ Помилка: {e}"
         print(error_msg)
-        log_message(error_msg, log_file_path)
+        logging.error(error_msg)
         error_count += total_items
     except requests.exceptions.RequestException as e:
         error_msg = f"❌ Помилка з'єднання або запиту: {e}"
         print(error_msg)
-        log_message(error_msg, log_file_path)
+        logging.error(error_msg)
         error_count += total_items
     except Exception as e:
         error_msg = f"❌ Виникла невідома помилка під час завантаження: {e}"
         print(error_msg)
-        log_message(error_msg, log_file_path)
+        logging.error(error_msg)
         error_count += total_items
     finally:
         end_time = time.time()
         elapsed_time = int(end_time - start_time)
-        
-        print(f"🎉 Оновлення завершено. Оновлено {updated_count} товарів за {elapsed_time} сек.")
+
+        print(f"🎉 Оновлення {log_message} завершено. Оновлено {updated_count} товарів за {elapsed_time} сек.")
         if error_count > 0:
             print(f"⚠️ Завершено з {error_count} помилками. Детальніше в лог-файлі.")
-        
-        log_message(f"--- Підсумок оновлення ---", log_file_path)
-        log_message(f"Статус: {'Успішно' if error_count == 0 else 'Завершено з помилками'}", log_file_path)
-        log_message(f"Кількість товарів: {updated_count} з {total_items}", log_file_path)
-        log_message(f"Тривалість: {elapsed_time} сек.", log_file_path)
+
+        logging.info(f"--- Підсумок оновлення {log_message} ---")
+        logging.info(f"Статус: {'Успішно' if error_count == 0 else 'Завершено з помилками'}")
+        logging.info(f"Кількість товарів: {updated_count} з {total_items}")
+        logging.info(f"Тривалість: {elapsed_time} сек.")
         if error_count > 0:
-            log_message(f"Кількість помилок: {error_count}. Детальні помилки дивіться вище.", log_file_path)
+            logging.info(f"Кількість помилок: {error_count}. Детальні помилки дивіться вище.")
