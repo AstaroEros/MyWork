@@ -49,36 +49,6 @@ def check_version():
     else:
         print("Error:", response.status_code, response.text)
 
-"""
-def setup_logging(settings):
-   Налаштовує систему логування, використовуючи шляхи з налаштувань.
-    
-    # Використовуємо os.path.join для коректного об'єднання шляхів
-    base_dir = os.path.join(os.path.dirname(__file__), "..")
-    log_dir = os.path.join(base_dir, settings["paths"]["logs_dir"])
-    current_log_path = os.path.join(log_dir, settings["paths"]["main_log_file"])
-
-    os.makedirs(log_dir, exist_ok=True)
-    
-    if os.path.exists(current_log_path):
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        new_log_file = f"logs_{timestamp}.log"
-        new_log_path = os.path.join(log_dir, new_log_file)
-        try:
-            os.rename(current_log_path, new_log_path)
-            print(f"✅ Старий лог-файл перейменовано на {os.path.basename(new_log_path)}")
-        except OSError as e:
-            print(f"❌ Помилка при перейменуванні лог-файлу: {e}")
-
-    logging.basicConfig(
-        filename=current_log_path,
-        level=logging.INFO,
-        format='%(asctime)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        filemode='a'
-    )
-
-"""
 def setup_new_log_file():
     """
     Перейменовує існуючий лог-файл та налаштовує новий,
