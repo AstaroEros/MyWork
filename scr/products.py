@@ -479,16 +479,19 @@ def process_supplier_3_price_list():
                     skipped_rows += 1
                     continue
 
-                # Перевірка колонок 3 та 4 на ціле число >= 0
+                # Перетворення колонок 3 та 4 на цілі числа
                 is_valid = True
                 for col_index in [2, 3]:
                     value = row[col_index]
                     try:
+                        # Перетворюємо значення на float, а потім на int, щоб позбутися .0
                         int_value = int(float(value))
                         if int_value < 0:
                             logging.warning(f"🚫 Видалено рядок {row_number} через від'ємне значення в колонці {col_index + 1}: '{value}'.")
                             is_valid = False
                             break
+                        # Записуємо оброблене ціле значення назад у рядок
+                        row[col_index] = str(int_value) 
                     except (ValueError, IndexError):
                         logging.warning(f"🚫 Видалено рядок {row_number} через некоректне числове значення в колонці {col_index + 1}: '{value}'.")
                         is_valid = False
@@ -1165,6 +1168,9 @@ def update_products(update_type):
         print("❌ Неможливо завантажити налаштування. Перевірте файл.")
         return
 
+    # Забезпечуємо таймаут для всіх запитів POST до WooCommerce API
+    WOO_API_TIMEOUT = 300 # Таймаут в секундах
+
     base_dir = "/var/www/scripts/update/csv/output"
 
     # Вибір файлу та ключів для оновлення залежно від типу
@@ -1212,51 +1218,52 @@ def update_products(update_type):
 
         logging.info(f"🔎 Знайдено {total_items} товарів у файлі '{os.path.basename(source_file_path)}' для оновлення.")
 
-        payloads = []
-        for i, row in enumerate(data_to_update, 1):
-            product_id = row.get('id')
-            
-            if not product_id:
-                logging.warning(f"⚠️ Рядок {i}: пропущено, не знайдено 'id'.")
-                continue
+        BATCH_SIZE = 20
+        for i in range(0, total_items, BATCH_SIZE):
+            batch = data_to_update[i:i + BATCH_SIZE]
+            payloads = []
 
-            # Формуємо payload динамічно, використовуючи надані ключі
-            payload = {"id": product_id}
-            for key in payload_keys:
-                if key in row:
-                    payload[key] = row.get(key)
-                else:
-                    logging.warning(f"⚠️ Рядок {i} (ID: {product_id}): не знайдено колонку '{key}'.")
+            for row in batch:
+                product_id = row.get('id')
+                if not product_id:
+                    logging.warning(f"⚠️ Рядок {i + 1}: пропущено, не знайдено 'id'.")
+                    continue
 
-            payloads.append(payload)
+                payload = {"id": product_id}
+                for key in payload_keys:
+                    if key in row:
+                        payload[key] = row.get(key)
+                    else:
+                        logging.warning(f"⚠️ Рядок {i + 1} (ID: {product_id}): не знайдено колонку '{key}'.")
+                
+                payloads.append(payload)
 
-        # Відправляємо оновлення пачками
-        if payloads:
-            response = requests.post(api_url, json={"update": payloads}, auth=(consumer_key, consumer_secret))
-            response.raise_for_status()
+            if payloads:
+                try:
+                    response = requests.post(api_url, json={"update": payloads}, auth=(consumer_key, consumer_secret), timeout=WOO_API_TIMEOUT)
+                    response.raise_for_status()
 
-            result = response.json()
-            if 'update' in result:
-                updated_count = len(result['update'])
-                error_count = len(result.get('errors', []))
-                for error in result.get('errors', []):
-                    error_msg = f"❌ Помилка оновлення: {error.get('message', 'Невідома помилка')}"
-                    logging.error(error_msg)
+                    result = response.json()
+                    updated_count += len(result.get('update', []))
+                    batch_errors = len(result.get('errors', []))
+                    error_count += batch_errors
+
+                    if batch_errors > 0:
+                        for error in result['errors']:
+                            error_msg = f"❌ Помилка в пакеті {i}-{i+BATCH_SIZE}: {error.get('message', 'Невідома помилка')} (код: {error.get('code', 'N/A')})"
+                            logging.error(error_msg)
+                            print(error_msg)
+                    else:
+                        logging.info(f"✅ Пакет {i}-{i+BATCH_SIZE} успішно оновлено.")
+
+                except requests.exceptions.RequestException as e:
+                    error_msg = f"❌ Помилка з'єднання або запиту для пакета {i}-{i+BATCH_SIZE}: {e}"
                     print(error_msg)
-        else:
-            logging.info("ℹ️ Немає даних для оновлення. Операція пропущена.")
-
-        status_message = f"✅ Оброблено {len(payloads)} товарів."
-        logging.info(status_message)
-        print(status_message)
-
+                    logging.error(error_msg)
+                    error_count += len(payloads) 
+                    continue
     except FileNotFoundError as e:
         error_msg = f"❌ Помилка: {e}"
-        print(error_msg)
-        logging.error(error_msg)
-        error_count += total_items
-    except requests.exceptions.RequestException as e:
-        error_msg = f"❌ Помилка з'єднання або запиту: {e}"
         print(error_msg)
         logging.error(error_msg)
         error_count += total_items
