@@ -3,7 +3,7 @@ from scr.base_function import check_version, check_csv_data
 from scr.products import export_products, download_supplier_price_list, process_supplier_1_price_list, \
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
-from scr.suppliers_1 import find_new_products
+from scr.suppliers_1 import find_new_products, find_product_data
 
 
 def main():
@@ -83,7 +83,12 @@ def main():
         help="Знайти нові товари у прайс-листах, яких немає на сайті."
     )
 
-
+    # ✨ Додаємо новий аргумент для пошуку даних про товар
+    parser.add_argument(
+        "--find-product-data",
+        action="store_true",
+        help="Знайти URL, штрих-код та атрибути для нових товарів."
+    )
 
 
     # 3. Парсинг аргументів
@@ -132,6 +137,12 @@ def main():
         print("🔍 Запускаю пошук нових товарів...")
         find_new_products()
     
+    # ✨ Додаємо новий elif блок для запуску нової функції
+    elif args.find_product_data:
+        print("🔍 Запускаю пошук даних про товари...")
+        find_product_data()
+
+
     else:
         # Якщо аргументи не вказано, вивести довідку
         print("❌ Не вказано жодної дії. Використайте -h або --help для довідки.")
