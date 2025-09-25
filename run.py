@@ -3,6 +3,9 @@ from scr.base_function import check_version, check_csv_data
 from scr.products import export_products, download_supplier_price_list, process_supplier_1_price_list, \
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
+from scr.suppliers_1 import find_new_products
+
+
 def main():
     """
     Основна функція для обробки аргументів командного рядка та запуску відповідних функцій.
@@ -73,6 +76,15 @@ def main():
         choices=[1, 2],
         help="Запустіть оновлення товарів: 1 для залишків/цін, 2 для акцій.")
 
+    # ✨ Новий аргумент для пошуку нових товарів
+    parser.add_argument(
+        "--find-new-products",
+        action="store_true",
+        help="Знайти нові товари у прайс-листах, яких немає на сайті."
+    )
+
+
+
 
     # 3. Парсинг аргументів
     args = parser.parse_args()
@@ -113,6 +125,13 @@ def main():
         print("📦 Запускаю оновлення товарів на сайті...")
         # ТЕПЕР МИ ПЕРЕДАЄМО ЗНАЧЕННЯ АРГУМЕНТУ ДО ФУНКЦІЇ update_products
         update_products(str(args.update_products))
+    
+        
+    # ✨ Нова логіка для пошуку нових товарів
+    elif args.find_new_products:
+        print("🔍 Запускаю пошук нових товарів...")
+        find_new_products()
+    
     else:
         # Якщо аргументи не вказано, вивести довідку
         print("❌ Не вказано жодної дії. Використайте -h або --help для довідки.")
