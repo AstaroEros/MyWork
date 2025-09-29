@@ -8,7 +8,7 @@ import pandas as pd
 from bs4 import BeautifulSoup
 import random 
 import logging
-from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log_message_to_existing_file
+from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log_message_to_existing_file, load_attributes_csv, save_attributes_csv
 from datetime import datetime, timedelta
 
 def find_new_products():
@@ -123,7 +123,7 @@ def find_product_data():
     """
     Зчитує файл з новими товарами, переходить за URL-адресою,
     знаходить URL-адресу товару та штрих-код на сторінці,
-    і записує знайдену URL-адресу в колонку B(1).
+    і записує знайдену URL-адресу в колонку B(1) одразу після обробки.
     """
     log_message_to_existing_file()
     logging.info("Починаю пошук URL-адрес товарів та штрих-кодів...")
@@ -131,84 +131,263 @@ def find_product_data():
     settings = load_settings()
     supliers_new_path = settings['paths']['csv_path_supliers_1_new']
     site_url = settings['suppliers']['1']['site']
+    temp_file_path = supliers_new_path + '.temp'
+
+    try:
+        # Зчитуємо дані з оригінального файлу
+        with open(supliers_new_path, mode='r', encoding='utf-8') as input_file:
+            reader = csv.reader(input_file)
+            headers = next(reader)
+            
+            # Відкриваємо тимчасовий файл для запису
+            with open(temp_file_path, mode='w', encoding='utf-8', newline='') as output_file:
+                writer = csv.writer(output_file)
+                writer.writerow(headers)
+                
+                for idx, row in enumerate(reader):
+                    search_url = row[0].strip()
+                    file_sku = row[5].strip()
+
+                    if not search_url or search_url.startswith('Помилка запиту'):
+                        logging.warning(f"Рядок {idx + 2}: Пропускаю товар з артикулом '{file_sku}' через відсутність URL пошуку.")
+                        writer.writerow(row)
+                        continue
+                    
+                    try:
+                        response = requests.get(search_url)
+                        response.raise_for_status()
+                        soup = BeautifulSoup(response.text, 'html.parser')
+                        
+                        found_url = None
+                        
+                        # Пошук варіативних товарів
+                        variant_inputs = soup.find_all('input', class_='variant_control', attrs={'data-code': True})
+                        for input_tag in variant_inputs:
+                            site_sku = input_tag.get('data-code', '').strip()
+                            if file_sku == site_sku:
+                                parent_div = input_tag.find_parent('div', class_='card-block')
+                                if parent_div:
+                                    link_tag = parent_div.find('h4', class_='card-title').find('a')
+                                    if link_tag and link_tag.has_attr('href'):
+                                        found_url = site_url + link_tag['href']
+                                        break
+                        
+                        if not found_url:
+                            # Пошук простих товарів
+                            simple_divs = soup.find_all('div', class_='radio')
+                            for div_tag in simple_divs:
+                                site_sku = div_tag.get_text(strip=True).strip()
+                                if file_sku == site_sku:
+                                    parent_div = div_tag.find_parent('div', class_='card-block')
+                                    if parent_div:
+                                        link_tag = parent_div.find('h4', class_='card-title').find('a')
+                                        if link_tag and link_tag.has_attr('href'):
+                                            found_url = site_url + link_tag['href']
+                                            break
+                        
+                        if found_url:
+                            row[1] = found_url
+                            logging.info(f"Рядок {idx + 2}: Артикул '{file_sku}' - URL товару знайдено: {found_url}")
+                        else:
+                            logging.warning(f"Рядок {idx + 2}: Артикул '{file_sku}' - URL товару не знайдено.")
+
+                        writer.writerow(row)
+                    
+                    except requests.RequestException as e:
+                        logging.error(f"Рядок {idx + 2}: Помилка при запиті до {search_url}: {e}")
+                        row[0] = f'Помилка запиту: {e}'
+                        writer.writerow(row)
+                    
+                    time.sleep(random.uniform(1, 3))
+
+        # Після успішної обробки перейменовуємо тимчасовий файл
+        os.replace(temp_file_path, supliers_new_path)
+        logging.info("Пошук завершено. Файл оновлено.")
+
+    except FileNotFoundError as e:
+        logging.error(f"Помилка: Файл не знайдено - {e}")
+    except Exception as e:
+        # Якщо сталася помилка, видаляємо тимчасовий файл, щоб уникнути пошкодження
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+        logging.error(f"Виникла непередбачена помилка: {e}")
+
+
+
+def parse_product_attributes():
+    """
+    Парсить сторінки товарів, застосовує заміну з attribute.csv (блочна структура) 
+    і додає нові невідомі значення одразу перед наступним блоком-заголовком.
+    """
+    log_message_to_existing_file()
+    logging.info("Починаю парсинг сторінок товарів для вилучення атрибутів...")
+
+    settings = load_settings()
+    try:
+        supliers_new_path = settings['paths']['csv_path_supliers_1_new']
+        product_data_map = settings['suppliers']['1']['product_data_columns']
+        other_attrs_index = settings['suppliers']['1']['other_attributes_column']
+    except TypeError as e:
+        logging.error(f"Помилка доступу до налаштувань. Перевірте settings.json: {e}")
+        return
+    
+    processing_map = product_data_map.copy()
+    if "Штрих-код" in processing_map:
+        processing_map.pop("Штрих-код")
+
+    replacements_map, raw_data = load_attributes_csv()
+    changes_made = False 
+
+    max_raw_row_len = len(raw_data[0]) if raw_data and raw_data[0] else 10
+
+    # === ЛОГІКА ДЛЯ ПОШУКУ МІСЦЯ ВСТАВКИ (КІНЕЦЬ БЛОКУ) ===
+    # insertion_points: {col_index: індекс_в_raw_data_для_вставки}
+    # Це індекс ПЕРЕД яким потрібно вставити новий рядок.
+    
+    insertion_points = {}
+    current_col_index = None
+    
+    # Ігноруємо заголовок (raw_data[0])
+    for i, row in enumerate(raw_data[1:], start=1):
+        
+        is_header = row and row[0].strip().isdigit()
+        
+        if is_header:
+            try:
+                col_index = int(row[0].strip())
+                
+                # 1. Завершуємо попередній блок: якщо ми перейшли до нового заголовка
+                if current_col_index is not None and current_col_index not in insertion_points:
+                    # Якщо попередній блок був порожній (нічого не оновлювалося), точка вставки буде тут (перед поточним заголовком)
+                    insertion_points[current_col_index] = i
+                
+                # 2. Починаємо новий блок: точка вставки для ТЕПЕРІШНЬОГО блоку
+                current_col_index = col_index
+                # Початкова точка вставки - одразу після поточного заголовка
+                insertion_points[col_index] = i + 1 
+                
+            except ValueError:
+                current_col_index = None
+        
+        # Якщо це рядок з атрибутом (або порожній рядок в межах блоку), оновлюємо місце вставки
+        elif current_col_index is not None:
+            insertion_points[current_col_index] = i + 1
+        
+    logging.debug(f"Точки вставки (insertion_points): {insertion_points}")
+    # ==========================================
+
 
     try:
         with open(supliers_new_path, mode='r', encoding='utf-8') as input_file:
             reader = csv.reader(input_file)
             headers = next(reader)
-            rows = list(reader)
-
-        updated_rows = [headers]
-        for row in rows:
-            search_url = row[0].strip()
-            # Зчитуємо артикул з колонки f(5) (індекс 5)
-            file_sku = row[5].strip() 
-
-            if not search_url or search_url.startswith('Помилка запиту'):
-                logging.warning(f"Пропускаю товар без URL: {file_sku}")
-                updated_rows.append(row)
-                continue
-
-            logging.info(f"Обробляю товар з артикулом: {file_sku}. URL пошуку: {search_url}")
             
-            try:
-                response = requests.get(search_url)
-                response.raise_for_status()
-                soup = BeautifulSoup(response.text, 'html.parser')
+            temp_file_path = supliers_new_path + '.temp'
+            with open(temp_file_path, mode='w', encoding='utf-8', newline='') as output_file:
+                writer = csv.writer(output_file)
+                writer.writerow(headers)
                 
-                found_url = None
-                
-                # Пошук варіативних товарів
-                variant_inputs = soup.find_all('input', class_='variant_control', attrs={'data-code': True})
-                for input_tag in variant_inputs:
-                    site_sku = input_tag.get('data-code', '').strip()
-                    logging.info(f"Артикул товару з файлу = {file_sku}, артикул для звірки = {site_sku}")
-                    if file_sku == site_sku:
-                        parent_div = input_tag.find_parent('div', class_='card-block')
-                        if parent_div:
-                            link_tag = parent_div.find('h4', class_='card-title').find('a')
-                            if link_tag and link_tag.has_attr('href'):
-                                found_url = site_url + link_tag['href']
-                                logging.info(f"Знайдено варіативний товар: {file_sku}. URL: {found_url}")
-                                break
-                
-                if not found_url:
-                    # Пошук простих товарів
-                    simple_divs = soup.find_all('div', class_='radio')
-                    for div_tag in simple_divs:
-                        site_sku = div_tag.get_text(strip=True).strip()
-                        logging.info(f"Артикул товару з файлу = {file_sku}, артикул для звірки = {site_sku}")
-                        if file_sku == site_sku:
-                            parent_div = div_tag.find_parent('div', class_='card-block')
-                            if parent_div:
-                                link_tag = parent_div.find('h4', class_='card-title').find('a')
-                                if link_tag and link_tag.has_attr('href'):
-                                    found_url = site_url + link_tag['href']
-                                    logging.info(f"Знайдено простий товар: {file_sku}. URL: {found_url}")
-                                    break
-                
-                if found_url:
-                    # Записуємо URL в колонку B(1)
-                    row[1] = found_url
-                else:
-                    logging.warning(f"Не вдалося знайти URL-адресу для товару: {file_sku}")
+                for idx, row in enumerate(reader):
+                    product_url = row[1].strip()
+                    file_sku = row[5].strip()
+                    max_index = max(max(product_data_map.values(), default=0), other_attrs_index)
+                    if len(row) <= max_index:
+                        row.extend([''] * (max_index + 1 - len(row)))
+                        
+                    if not product_url or product_url.startswith('Помилка запиту'):
+                        writer.writerow(row)
+                        continue
 
-                updated_rows.append(row)
-            
-            except requests.RequestException as e:
-                logging.error(f"Помилка при запиті до {search_url}: {e}")
-                row[0] = f'Помилка запиту: {e}'
-                updated_rows.append(row)
-            
-            time.sleep(2)
+                    try:
+                        response = requests.get(product_url)
+                        response.raise_for_status()
+                        soup = BeautifulSoup(response.text, 'html.parser')
+                        
+                        characteristics_div = soup.find('div', id='w0-tab0')
+                        
+                        if characteristics_div and characteristics_div.find('table'):
+                            parsed_attributes = {}
+                            for tr in characteristics_div.find('table').find_all('tr'):
+                                cells = tr.find_all('td')
+                                if len(cells) == 2:
+                                    key = cells[0].get_text(strip=True).replace(':', '')
+                                    value = cells[1].get_text(strip=True)
+                                    parsed_attributes[key] = value
 
-        with open(supliers_new_path, mode='w', encoding='utf-8', newline='') as output_file:
-            writer = csv.writer(output_file)
-            writer.writerows(updated_rows)
+                            other_attributes = []
+                            for attr_name, attr_value in parsed_attributes.items():
+                                
+                                target_col_index = processing_map.get(attr_name)
+                                
+                                if target_col_index is not None:
+                                    
+                                    replacement_rules = replacements_map.get(target_col_index, {})
+                                    original_value_lower = attr_value.strip().lower() 
+                                    
+                                    new_value = replacement_rules.get(original_value_lower)
+                                    
+                                    # 1. Застосування заміни
+                                    if new_value is not None and new_value != "":
+                                        attr_value = new_value
+                                        
+                                    else:
+                                        # 2. Додавання нового атрибута, якщо його немає
+                                        if original_value_lower not in replacement_rules:
+                                            
+                                            insert_index = insertion_points.get(target_col_index)
+                                            
+                                            if insert_index is None:
+                                                logging.error(f"Атрибут '{attr_value}' (I={target_col_index}) не додано: відсутня точка вставки (заголовок не знайдено).")
+                                                attr_value = attr_value 
+                                                continue
+                                            
+                                            logging.warning(f"НОВИЙ АТРИБУТ БУДЕ ДОДАНО: '{attr_value}' (I={target_col_index}) в індекс {insert_index}.")
 
-    except FileNotFoundError as e:
-        logging.error(f"Помилка: Файл не знайдено - {e}")
+                                            # Новий рядок: ['', '', original, '', '', ...] (col 0 і col 1 порожні)
+                                            new_raw_row = ['', '', original_value_lower] + [''] * (max_raw_row_len - 3)
+                                            
+                                            # Вставляємо новий рядок у кінець поточного блоку
+                                            raw_data.insert(insert_index, new_raw_row)
+                                            
+                                            # Оновлюємо мапу для поточної сесії
+                                            replacements_map.setdefault(target_col_index, {})[original_value_lower] = ""
+                                            changes_made = True 
+                                            
+                                            # ОНОВЛЕННЯ ТОЧОК ВСТАВКИ: Зсуваємо всі подальші індекси на 1
+                                            for col, point in insertion_points.items():
+                                                if point >= insert_index:
+                                                    insertion_points[col] += 1
+                                            
+                                            # Використовуємо оригінальне значення
+                                            attr_value = attr_value 
+
+                                    row[target_col_index] = attr_value
+                                
+                                elif attr_name == "Штрих-код":
+                                     pass 
+                                else:
+                                    other_attributes.append(f"{attr_name}:{attr_value}")
+
+                            if other_attributes:
+                                row[other_attrs_index] = ', '.join(other_attributes)
+                                
+                        writer.writerow(row)
+                    
+                    except requests.RequestException:
+                        writer.writerow(row)
+                    
+                    time.sleep(random.uniform(1, 3))
+
+        os.replace(temp_file_path, supliers_new_path)
+        logging.info("Парсинг атрибутів завершено. Файл оновлено.")
+
+        # Збереження оновлених сирих даних у CSV
+        if changes_made:
+            save_attributes_csv(raw_data)
+        else:
+            logging.info("Збереження attribute.csv не потрібне. Змін: False.")
+
     except Exception as e:
         logging.error(f"Виникла непередбачена помилка: {e}")
-
-    logging.info("Пошук завершено. Файл оновлено.")
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)

@@ -3,7 +3,7 @@ from scr.base_function import check_version, check_csv_data
 from scr.products import export_products, download_supplier_price_list, process_supplier_1_price_list, \
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
-from scr.suppliers_1 import find_new_products, find_product_data
+from scr.suppliers_1 import find_new_products, find_product_data, parse_product_attributes
 
 
 def main():
@@ -91,6 +91,12 @@ def main():
     )
 
 
+    parser.add_argument(
+        "--parse-attributes",
+        action="store_true",
+        help="Парсити сторінки товарів для вилучення атрибутів."
+    )
+
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -141,6 +147,11 @@ def main():
     elif args.find_product_data:
         print("🔍 Запускаю пошук даних про товари...")
         find_product_data()
+
+    elif args.parse_attributes:
+        print("⚙️ Запускаю парсинг атрибутів...")
+        parse_product_attributes()
+
 
 
     else:

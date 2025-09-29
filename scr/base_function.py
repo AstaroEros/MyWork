@@ -236,3 +236,90 @@ def check_csv_data(profile_id):
         
     logging.info(f"✅ Перевірка файлу {os.path.basename(full_csv_path)} пройшла успішно.")
     return True
+
+
+
+def get_config_path(filename):
+    """Повертає повний шлях до файлу конфігурації."""
+    # Припускаємо, що config знаходиться на один рівень вище від scr
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    config_dir = os.path.abspath(os.path.join(current_dir, '..', 'config'))
+    return os.path.join(config_dir, filename)
+
+def load_attributes_csv():
+    """
+    Завантажує правила заміни атрибутів з attribute.csv (гібридна блочна структура).
+    Повертає:
+    1. replacements_map: Словник {col_index: {original_value: new_value}} для швидкого пошуку.
+    2. raw_data: Список сирих рядків для збереження структури файлу.
+    """
+    attribute_path = get_config_path('attribute.csv')
+    replacements_map = {}
+    raw_data = []          
+    
+    # Стандартний заголовок
+    default_header = ["column_number", "attr_site_name", "atr_a", "atr_b", "atr_c", "atr_d", "atr_e", "atr_f", "atr_g", "atr_h", "atr_i"]
+    current_col_index = None # Відстежуємо поточний блок
+
+    try:
+        with open(attribute_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            
+            try:
+                header = next(reader)
+                raw_data.append(header)
+                max_row_len = len(header)
+            except StopIteration:
+                return {}, [default_header]
+
+            for row in reader:
+                # Нормалізуємо довжину рядка
+                row = row[:max_row_len] + [''] * (max_row_len - len(row))
+                raw_data.append(row)
+                
+                # 1. Якщо це рядок-заголовок (наприклад, "27",,,,,)
+                if row and row[0].strip().isdigit():
+                    try:
+                        current_col_index = int(row[0].strip())
+                        if current_col_index not in replacements_map:
+                            replacements_map[current_col_index] = {}
+                    except ValueError:
+                        current_col_index = None
+                        continue
+                
+                # 2. Якщо це рядок-правило (наприклад, ,,,чорний,,)
+                elif current_col_index is not None and len(row) >= 3:
+                    
+                    # Стандартизоване значення знаходиться в колонці 1 (attr_site_name)
+                    new_value = row[1].strip() 
+                    
+                    # Переглядаємо всі значення постачальників (починаючи з індексу 2)
+                    for original in row[2:]:
+                        original = original.strip().lower()
+                        if original:
+                            # Ключ - оригінал (lower), Значення - заміна (з attr_site_name)
+                            replacements_map[current_col_index][original] = new_value
+
+        return replacements_map, raw_data
+    
+    except FileNotFoundError:
+        logging.warning(f"Файл атрибутів 'attribute.csv' не знайдено. Буде створено новий.")
+        return {}, [default_header]
+    except Exception as e:
+        logging.error(f"Виникла помилка при завантаженні attribute.csv: {e}")
+        return {}, [default_header]
+
+
+def save_attributes_csv(raw_data):
+    """
+    Зберігає оновлені сирі дані у attribute.csv.
+    """
+    attribute_path = get_config_path('attribute.csv')
+    try:
+        # 'newline=''' важливий для коректного збереження CSV на різних ОС
+        with open(attribute_path, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerows(raw_data)
+        logging.info("Файл атрибутів attribute.csv оновлено.")
+    except Exception as e:
+        logging.error(f"Помилка при збереженні файлу атрибутів attribute.csv: {e}")
