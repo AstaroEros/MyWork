@@ -117,8 +117,6 @@ def find_new_products():
     except Exception as e:
         logging.info(f"Виникла непередбачена помилка: {e}")
 
-
-
 def find_product_data():
     """
     Зчитує файл з новими товарами, переходить за URL-адресою,
@@ -211,8 +209,6 @@ def find_product_data():
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
         logging.error(f"Виникла непередбачена помилка: {e}")
-
-
 
 def parse_product_attributes():
     """
@@ -389,5 +385,116 @@ def parse_product_attributes():
 
     except Exception as e:
         logging.error(f"Виникла непередбачена помилка: {e}")
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+
+def apply_final_standardization():
+    """
+    Застосовує фінальні правила стандартизації з attribute.csv до файлу SL_new.csv.
+    Замінює атрибути на значення з колонки 'attr_site_name', якщо воно існує.
+    Проігноровані атрибути (з порожнім 'attr_site_name') очищаються.
+    Атрибути, для яких не знайдено правил, залишаються без змін.
+    """
+    log_message_to_existing_file()
+    logging.info("Починаю фінальну стандартизацію атрибутів у SL_new.csv...")
+
+    settings = load_settings()
+    try:
+        supliers_new_path = settings['paths']['csv_path_supliers_1_new']
+        # Ми використовуємо process_data_columns, щоб знайти назви колонок для логування
+        product_data_map = settings['suppliers']['1']['product_data_columns']
+    except TypeError as e:
+        logging.error(f"Помилка доступу до налаштувань. Перевірте settings.json: {e}")
+        return
+    
+    # Виключення Штрих-коду
+    processing_map = product_data_map.copy()
+    if "Штрих-код" in processing_map:
+        processing_map.pop("Штрих-код")
+
+    # 1. Завантаження фінальної мапи заміни
+    # replacements_map: {col_index: {original_value (lower): new_value (attr_site_name)}}
+    replacements_map, _ = load_attributes_csv()
+    
+    # 2. Обробка файлу SL_new.csv
+    try:
+        temp_file_path = supliers_new_path + '.final_temp'
+        
+        with open(supliers_new_path, mode='r', encoding='utf-8') as input_file, \
+             open(temp_file_path, mode='w', encoding='utf-8', newline='') as output_file:
+            
+            reader = csv.reader(input_file)
+            writer = csv.writer(output_file)
+            
+            headers = next(reader)
+            writer.writerow(headers)
+            
+            # Словник для швидкого пошуку назви колонки за індексом для логування
+            column_indices = {index: col_name for col_name, index in processing_map.items()}
+            
+            for idx, row in enumerate(reader):
+                
+                # Перевірка та розширення рядка
+                max_index = max(product_data_map.values(), default=0)
+                if len(row) <= max_index:
+                    row.extend([''] * (max_index + 1 - len(row)))
+
+                for col_index, rules in replacements_map.items():
+                    
+                    # 3. Перевірка та застосування правил
+                    if col_index < len(row):
+                        current_value = row[col_index].strip()
+                        
+                        if not current_value:
+                            continue # Пропускаємо порожні клітинки
+
+                        original_value_lower = current_value.lower()
+                        col_name = column_indices.get(col_index, f"I={col_index}")
+                        
+                        # Знаходимо стандартизоване значення (attr_site_name)
+                        new_value = rules.get(original_value_lower)
+                        
+                        # Перевірка: чи ЗНАЙДЕНО правило заміни (new_value is not None)
+                        if new_value is not None:
+                            
+                            # A) Якщо new_value (attr_site_name) НЕ порожнє - застосовуємо заміну
+                            if new_value:
+                                # Заміна лише якщо значення відрізняється
+                                if new_value != current_value:
+                                    row[col_index] = new_value
+                                    logging.info(f"Рядок {idx + 2}: ЗАМІНА ({col_name}): '{current_value}' -> '{new_value}'")
+                                else:
+                                    # Значення вже відповідає стандарту (new_value == current_value)
+                                    logging.debug(f"Рядок {idx + 2}: ЗНАЙДЕНО ({col_name}): Значення '{current_value}' вже стандартизовано.")
+                            
+                            # B) Якщо new_value (attr_site_name) ПОРОЖНЄ (вирішено ігнорувати/очистити)
+                            else:
+                                if current_value:
+                                    row[col_index] = "" # Очищаємо поле
+                                    logging.warning(f"Рядок {idx + 2}: ІГНОРУВАННЯ/ОЧИЩЕННЯ ({col_name}): Значення '{current_value}' очищено згідно з attribute.csv.")
+
+                        # Якщо правило НЕ ЗНАЙДЕНО в replacements_map
+                        else:
+                            # Це означає, що атрибут не був раніше знайдений і доданий,
+                            # або ж є проблема з його форматуванням (пробіли, коми/крапки).
+                            # Ми залишаємо його без змін (якщо він був заповнений) і логуємо попередження.
+                            logging.warning(
+                                f"Рядок {idx + 2}: НЕ ЗНАЙДЕНО ПРАВИЛО ({col_name}): Значення '{current_value}' "
+                                f"залишено без змін, оскільки відсутнє у attribute.csv."
+                            )
+
+
+                writer.writerow(row)
+
+        os.replace(temp_file_path, supliers_new_path)
+        logging.info("Фінальна стандартизація завершена. SL_new.csv оновлено.")
+
+    except FileNotFoundError as e:
+        logging.error(f"Помилка: Файл не знайдено - {e}")
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+    except Exception as e:
+        logging.error(f"Виникла непередбачена помилка під час фіналізації: {e}")
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)

@@ -3,7 +3,7 @@ from scr.base_function import check_version, check_csv_data
 from scr.products import export_products, download_supplier_price_list, process_supplier_1_price_list, \
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
-from scr.suppliers_1 import find_new_products, find_product_data, parse_product_attributes
+from scr.suppliers_1 import find_new_products, find_product_data, parse_product_attributes, apply_final_standardization
 
 
 def main():
@@ -97,6 +97,14 @@ def main():
         help="Парсити сторінки товарів для вилучення атрибутів."
     )
 
+    # === НОВИЙ АРГУМЕНТ для фінальної стандартизації ===
+    parser.add_argument(
+        "--standardize-final",
+        action="store_true",
+        help="Застосувати фінальні правила заміни з attribute.csv до SL_new.csv."
+    )
+
+
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -152,7 +160,10 @@ def main():
         print("⚙️ Запускаю парсинг атрибутів...")
         parse_product_attributes()
 
-
+    # ✨ Додаємо новий elif блок для фінальної стандартизації
+    elif args.standardize_final:
+        print("✅ Запускаю фінальну стандартизацію SL_new.csv...")
+        apply_final_standardization()
 
     else:
         # Якщо аргументи не вказано, вивести довідку
