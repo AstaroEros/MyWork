@@ -4,7 +4,7 @@ from scr.products import export_products, download_supplier_price_list, process_
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
 from scr.suppliers_1 import find_new_products, find_product_data, parse_product_attributes, apply_final_standardization, \
-                        fill_product_category, refill_product_category  
+                        fill_product_category, refill_product_category, separate_existing_products
 
 
 def main():
@@ -119,6 +119,13 @@ def main():
         help="Повторно заповнити колонки Категорія (Q) та pa_used (AV) на основі оновлених правил у category.csv."
     )
 
+    # ✨ НОВИЙ АРГУМЕНТ для звірки штрихкодів
+    parser.add_argument( # <--- ДОДАНО
+    "--separate-existing",
+    action="store_true",
+    help="Звірити SL_new.csv з базою (zalishki.csv) за штрихкодом, перенести існуючі товари у SL_old_prod_new_SHK.csv та видалити їх з SL_new.csv."
+    )
+
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -189,6 +196,10 @@ def main():
         print("🔄 Запускаю повторне заповнення категорій та pa_used...")
         refill_product_category()
 
+    # ✨ Додаємо новий elif блок для звірки та перенесення
+    elif args.separate_existing: # <--- ДОДАНО
+        print("🔍 Запускаю звірку штрихкодів з базою та перенесення існуючих товарів...")
+        separate_existing_products()
 
     else:
         # Якщо аргументи не вказано, вивести довідку

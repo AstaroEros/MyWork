@@ -8,6 +8,7 @@ import pandas as pd
 from bs4 import BeautifulSoup
 import random 
 import logging
+from typing import Dict, Tuple, List, Optional
 from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log_message_to_existing_file, load_attributes_csv, \
                                 save_attributes_csv, load_category_csv, save_category_csv, load_poznachky_csv
 from datetime import datetime, timedelta
@@ -225,27 +226,25 @@ def parse_product_attributes():
         supliers_new_path = settings['paths']['csv_path_supliers_1_new']
         product_data_map = settings['suppliers']['1']['product_data_columns']
         other_attrs_index = settings['suppliers']['1']['other_attributes_column']
-    except TypeError as e:
+    except (TypeError, KeyError) as e:
         logging.error(f"Помилка доступу до налаштувань. Перевірте settings.json: {e}")
         return
     
+    # Створюємо мапу для обробки атрибутів, виключаючи Штрих-код
     processing_map = product_data_map.copy()
     if "Штрих-код" in processing_map:
-        processing_map.pop("Штрих-код")
+        processing_map.pop("Штрих-код") 
 
     replacements_map, raw_data = load_attributes_csv()
     changes_made = False 
 
+    # Визначаємо максимальну довжину рядка для коректної вставки в attribute.csv
     max_raw_row_len = len(raw_data[0]) if raw_data and raw_data[0] else 10
 
     # === ЛОГІКА ДЛЯ ПОШУКУ МІСЦЯ ВСТАВКИ (КІНЕЦЬ БЛОКУ) ===
-    # insertion_points: {col_index: індекс_в_raw_data_для_вставки}
-    # Це індекс ПЕРЕД яким потрібно вставити новий рядок.
-    
     insertion_points = {}
     current_col_index = None
     
-    # Ігноруємо заголовок (raw_data[0])
     for i, row in enumerate(raw_data[1:], start=1):
         
         is_header = row and row[0].strip().isdigit()
@@ -254,20 +253,15 @@ def parse_product_attributes():
             try:
                 col_index = int(row[0].strip())
                 
-                # 1. Завершуємо попередній блок: якщо ми перейшли до нового заголовка
                 if current_col_index is not None and current_col_index not in insertion_points:
-                    # Якщо попередній блок був порожній (нічого не оновлювалося), точка вставки буде тут (перед поточним заголовком)
                     insertion_points[current_col_index] = i
                 
-                # 2. Починаємо новий блок: точка вставки для ТЕПЕРІШНЬОГО блоку
                 current_col_index = col_index
-                # Початкова точка вставки - одразу після поточного заголовка
                 insertion_points[col_index] = i + 1 
                 
             except ValueError:
                 current_col_index = None
         
-        # Якщо це рядок з атрибутом (або порожній рядок в межах блоку), оновлюємо місце вставки
         elif current_col_index is not None:
             insertion_points[current_col_index] = i + 1
         
@@ -288,6 +282,8 @@ def parse_product_attributes():
                 for idx, row in enumerate(reader):
                     product_url = row[1].strip()
                     file_sku = row[5].strip()
+                    
+                    # Визначаємо максимальний індекс для розширення рядка
                     max_index = max(max(product_data_map.values(), default=0), other_attrs_index)
                     if len(row) <= max_index:
                         row.extend([''] * (max_index + 1 - len(row)))
@@ -318,6 +314,7 @@ def parse_product_attributes():
                                 target_col_index = processing_map.get(attr_name)
                                 
                                 if target_col_index is not None:
+                                    # АТРИБУТИ, ЩО ЙДУТЬ В attribute.csv
                                     
                                     replacement_rules = replacements_map.get(target_col_index, {})
                                     original_value_lower = attr_value.strip().lower() 
@@ -341,43 +338,53 @@ def parse_product_attributes():
                                             
                                             logging.warning(f"НОВИЙ АТРИБУТ БУДЕ ДОДАНО: '{attr_value}' (I={target_col_index}) в індекс {insert_index}.")
 
-                                            # Новий рядок: ['', '', original, '', '', ...] (col 0 і col 1 порожні)
-                                            new_raw_row = ['', '', original_value_lower] + [''] * (max_raw_row_len - 3)
+                                            # ВИПРАВЛЕННЯ: Коректне форматування нового рядка
+                                            new_raw_row = [''] * max_raw_row_len
+                                            new_raw_row[2] = original_value_lower # Оригінальне значення в колонку 2
                                             
-                                            # Вставляємо новий рядок у кінець поточного блоку
                                             raw_data.insert(insert_index, new_raw_row)
                                             
-                                            # Оновлюємо мапу для поточної сесії
                                             replacements_map.setdefault(target_col_index, {})[original_value_lower] = ""
                                             changes_made = True 
                                             
-                                            # ОНОВЛЕННЯ ТОЧОК ВСТАВКИ: Зсуваємо всі подальші індекси на 1
+                                            # Зсуваємо всі подальші точки вставки
                                             for col, point in insertion_points.items():
                                                 if point >= insert_index:
                                                     insertion_points[col] += 1
                                             
-                                            # Використовуємо оригінальне значення
                                             attr_value = attr_value 
 
                                     row[target_col_index] = attr_value
-                                
+                                    
                                 elif attr_name == "Штрих-код":
-                                     pass 
+                                    # ОБРОБКА ШТРИХ-КОДУ: запис у SL_new.csv, ігнорування attribute.csv
+                                    shk_index = product_data_map.get("Штрих-код")
+                                    if shk_index is not None:
+                                        row[shk_index] = attr_value.strip()
+                                        logging.info(f"Штрих-код '{attr_value.strip()}' записано у колонку {shk_index}.")
+                                    else:
+                                        logging.warning("Штрих-код знайдено в HTML, але його індекс відсутній у повній мапі.")
+                                
                                 else:
+                                    # АТРИБУТИ, ЩО ЙДУТЬ В ДОДАТКОВУ КОЛОНКУ
                                     other_attributes.append(f"{attr_name}:{attr_value}")
 
                             if other_attributes:
                                 row[other_attrs_index] = ', '.join(other_attributes)
                                 
+                            writer.writerow(row)
+                        
+                    except requests.RequestException as req_err:
+                        logging.error(f"Помилка запиту для URL {product_url}: {req_err}")
                         writer.writerow(row)
-                    
-                    except requests.RequestException:
+                    except Exception as e:
+                        logging.error(f"Непередбачена помилка парсингу для URL {product_url}: {e}")
                         writer.writerow(row)
                     
                     time.sleep(random.uniform(1, 3))
 
         os.replace(temp_file_path, supliers_new_path)
-        logging.info("Парсинг атрибутів завершено. Файл оновлено.")
+        logging.info("Парсинг атрибутів завершено. Файл SL_new.csv оновлено.")
 
         # Збереження оновлених сирих даних у CSV
         if changes_made:
@@ -418,7 +425,7 @@ def apply_final_standardization():
     # replacements_map: {col_index: {original_value (lower): new_value (attr_site_name)}}
     replacements_map, _ = load_attributes_csv()
     
-    # 2. Обробка файлу SL_new.csv
+    # 2. Обробка файлу csv
     try:
         temp_file_path = supliers_new_path + '.final_temp'
         
@@ -489,7 +496,7 @@ def apply_final_standardization():
                 writer.writerow(row)
 
         os.replace(temp_file_path, supliers_new_path)
-        logging.info("Фінальна стандартизація завершена. SL_new.csv оновлено.")
+        logging.info("Фінальна стандартизація завершена. csv оновлено.")
 
     except FileNotFoundError as e:
         logging.error(f"Помилка: Файл не знайдено - {e}")
@@ -881,5 +888,167 @@ def refill_product_category():
 
 
 
+
+def separate_existing_products():
+    """
+    Звіряє штрихкоди (C/2) SL_new.csv з базою (zalishki.csv),
+    переносить знайдені товари у SL_old_prod_new_SHK.csv та видаляє їх з SL_new.csv.
+    """
+    log_message_to_existing_file()
+    logging.info("Починаю звірку SL_new.csv зі штрихкодами бази (zalishki.csv)...")
+
+    settings = load_settings()
+    try:
+        sl_new_path = settings['paths']['csv_path_supliers_1_new']
+        zalishki_path = settings['paths']['csv_path_zalishki']
+        sl_old_prod_shk_path = settings['paths']['csv_path_sl_old_prod_new_shk']
+    except KeyError as e:
+        logging.error(f"Помилка конфігурації. Не знайдено шлях: {e}")
+        return
+        
+    # --- КРИТИЧНО НЕОБХІДНІ ЛОКАЛЬНІ ІНДЕКСИ ---
+    SHK_SL_NEW_INDEX = 2        # C (Штрихкод SL_new для звірки)
+    SHK_ZALISHKI_INDEX = 7      # H (Штрихкод у базі zalishki.csv)
+    ID_ZALISHKI_INDEX = 0       # A (ID у базі)
+    SKU_ZALISHKI_INDEX = 1      # B (SKU у базі)
+    DESCRIPTION_SL_NEW_INDEX = 7# H (Описание, мапиться до content)
+    OLD_SKU_SL_NEW_INDEX = 5    # E (old_sku, мапиться до artykul_lutsk)
+
+    # --- 0. Очищення SL_old_prod_new_SHK.csv (залишаємо лише заголовок) ---
+    sl_old_header_base = [
+        'id', 'sku', 'url_lutsk', 'shtrih_cod', 'artykul_lutsk', 'Позначки', 
+        'rank_math_focus_keyword', 'postachalnyk', 'post_status', 'manage_stock', 
+        'tax_status', 'excerpt', 'attribute:pa_based', 'attribute:pa_color', 
+        'attribute:pa_diameter', 'attribute:pa_efekt', 'attribute:pa_for-whom', 
+        'attribute:pa_height', 'attribute:pa_length', 'attribute:pa_line-brand', 
+        'attribute:pa_made-in', 'attribute:pa_manufacturer', 'attribute:pa_material', 
+        'attribute:pa_number-of-pieces', 'attribute:pa_peculiarities', 'attribute:pa_powered', 
+        'attribute:pa_presence-of-vibration', 'attribute:pa_size', 'attribute:pa_smell', 
+        'attribute:pa_taste', 'attribute:pa_texture', 'attribute:pa_type-of-control', 
+        'attribute:pa_type-of-packaging', 'attribute:pa_used', 'attribute:pa_volumen'
+    ]
+    # Додаємо content (AM) перед post_date (AX)
+    sl_old_header = sl_old_header_base + ['content', 'post_date', 'attribute_none', 'product_type'] 
+
+    try:
+        with open(sl_old_prod_shk_path, mode='w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(sl_old_header)
+        logging.info("Файл SL_old_prod_new_SHK.csv очищено (залишено лише заголовок, оновлено структуру).")
+    except Exception as e:
+        logging.error(f"Помилка при очищенні SL_old_prod_new_SHK.csv: {e}")
+        return
+    
+    # --- 1. Створення мапи штрихкодів бази ---
+    zalishki_map: Dict[str, Tuple[str, str]] = {} # {ШК: (ID, SKU)}
+    try:
+        with open(zalishki_path, mode='r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            next(reader) # Пропускаємо заголовок
+            for row in reader:
+                if len(row) > SHK_ZALISHKI_INDEX:
+                    shk = row[SHK_ZALISHKI_INDEX].strip()
+                    item_id = row[ID_ZALISHKI_INDEX].strip()
+                    item_sku = row[SKU_ZALISHKI_INDEX].strip()
+                    if shk:
+                        zalishki_map[shk] = (item_id, item_sku)
+        logging.info(f"Зчитано {len(zalishki_map)} унікальних штрихкодів з бази.")
+    except FileNotFoundError:
+        logging.error(f"Файл бази zalishki.csv не знайдено за шляхом: {zalishki_path}")
+        return
+    except Exception as e:
+        logging.error(f"Помилка при читанні zalishki.csv: {e}")
+        return
+
+    # --- 2. Обробка SL_new.csv та перенесення ---
+    
+    # Мапа відповідності: SL_old_idx (вихідний файл) -> SL_new_idx (вхідний файл)
+    MAPPING_INDICES = {
+        2: 1, # url_lutsk
+        3: SHK_SL_NEW_INDEX, # shtrih_cod (КЛЮЧ: 2)
+        4: OLD_SKU_SL_NEW_INDEX, # artykul_lutsk <- old_sku (4)
+        5: 19, # Позначки
+        6: 20, # rank_math_focus_keyword
+        7: 21, # postachalnyk (V)
+        8: 22, # post_status (W)
+        9: 23, # manage_stock (X)
+        10: 24, # tax_status (Y)
+        11: 25, # excerpt (Z)
+        # Атрибути з 12 до 34 (SL_old) <- з 26 до 48 (SL_new)
+    }
+    # Додаємо атрибути динамічно:
+    for i in range(23): # 23 атрибути
+        MAPPING_INDICES[12 + i] = 26 + i
+    
+    # Додаткові колонки (SL_old index -> SL_new index):
+    MAPPING_INDICES[35] = DESCRIPTION_SL_NEW_INDEX # content <- Описание (7)
+    MAPPING_INDICES[36] = 49  # post_date (AX)
+    MAPPING_INDICES[37] = 50  # attribute_none (AY)
+    MAPPING_INDICES[38] = 51  # product_type (AZ)
+
+    items_to_keep: List[List[str]] = []
+    items_to_move: List[List[str]] = []
+    moved_shks: List[str] = []
+    
+    sl_new_temp_path = sl_new_path + '.temp'
+    max_sl_new_index = 51 # Найбільший індекс для перевірки довжини рядка
+
+    try:
+        with open(sl_new_path, mode='r', encoding='utf-8') as input_file:
+            reader = csv.reader(input_file)
+            
+            sl_new_header = next(reader)
+            items_to_keep.append(sl_new_header) 
+
+            for row in reader:
+                
+                if len(row) <= max_sl_new_index:
+                    row.extend([''] * (max_sl_new_index + 1 - len(row)))
+
+                shk_value = row[SHK_SL_NEW_INDEX].strip()
+                
+                # Звірка штрихкоду
+                if shk_value and shk_value in zalishki_map:
+                    item_id, item_sku = zalishki_map[shk_value]
+                    
+                    new_row = [''] * len(sl_old_header)
+                    
+                    # 1. ID та SKU з бази
+                    new_row[0] = item_id 
+                    new_row[1] = item_sku
+                    
+                    # 2. Решта колонок з SL_new.csv
+                    for sl_old_idx, sl_new_idx in MAPPING_INDICES.items():
+                         new_row[sl_old_idx] = row[sl_new_idx]
+                    
+                    items_to_move.append(new_row)
+                    moved_shks.append(shk_value)
+                else:
+                    items_to_keep.append(row)
+
+        
+        # --- 3. Запис результатів ---
+        
+        if items_to_move:
+            # Використовуємо 'a' для додавання даних, оскільки заголовок вже записано
+            with open(sl_old_prod_shk_path, mode='a', encoding='utf-8', newline='') as output_file: 
+                writer = csv.writer(output_file)
+                writer.writerows(items_to_move)
+            logging.info(f"Успішно перенесено {len(items_to_move)} існуючих товарів у SL_old_prod_new_SHK.csv.")
+            logging.info(f"Перенесені штрихкоди (товари вже є в базі): {', '.join(moved_shks)}")
+        else:
+            logging.info("Не знайдено жодного товару з існуючим штрихкодом у базі.")
+
+        with open(sl_new_temp_path, mode='w', encoding='utf-8', newline='') as output_file:
+            writer = csv.writer(output_file)
+            writer.writerows(items_to_keep)
+        
+        os.replace(sl_new_temp_path, sl_new_path)
+        logging.info(f"SL_new.csv оновлено. Залишилося {len(items_to_keep) - 1} нових товарів для імпорту.")
+
+    except Exception as e:
+        logging.error(f"Виникла непередбачена помилка під час звірки та перенесення: {e}")
+        if os.path.exists(sl_new_temp_path):
+            os.remove(sl_new_temp_path)
 
 
