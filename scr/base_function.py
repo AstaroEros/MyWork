@@ -237,8 +237,6 @@ def check_csv_data(profile_id):
     logging.info(f"✅ Перевірка файлу {os.path.basename(full_csv_path)} пройшла успішно.")
     return True
 
-
-
 def get_config_path(filename):
     """Повертає повний шлях до файлу конфігурації."""
     # Припускаємо, що config знаходиться на один рівень вище від scr
@@ -309,7 +307,6 @@ def load_attributes_csv():
         logging.error(f"Виникла помилка при завантаженні attribute.csv: {e}")
         return {}, [default_header]
 
-
 def save_attributes_csv(raw_data):
     """
     Зберігає оновлені сирі дані у attribute.csv.
@@ -323,3 +320,115 @@ def save_attributes_csv(raw_data):
         logging.info("Файл атрибутів attribute.csv оновлено.")
     except Exception as e:
         logging.error(f"Помилка при збереженні файлу атрибутів attribute.csv: {e}")
+
+def load_category_csv():
+    """
+    Завантажує правила заміни категорій з category.csv.
+    Повертає:
+    1. category_map: Словник {supplier_id: {(name1, name2, name3): category_value}}
+    2. raw_data: Список сирих рядків для збереження структури файлу.
+    """
+    category_path = get_config_path('category.csv')
+    category_map = {}
+    raw_data = []          
+    
+    default_header = ["postachalnyk", "name_1", "name_2", "name_3", "category"]
+    current_supplier_id = None
+
+    try:
+        with open(category_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            
+            try:
+                header = next(reader)
+                raw_data.append(header)
+                max_row_len = len(header)
+            except StopIteration:
+                return {}, [default_header]
+
+            for row in reader:
+                row = row[:max_row_len] + [''] * (max_row_len - len(row))
+                raw_data.append(row)
+                
+                # 1. Якщо це рядок-заголовок постачальника (наприклад, "1",,,,)
+                if row and row[0].strip().isdigit():
+                    try:
+                        current_supplier_id = int(row[0].strip())
+                        if current_supplier_id not in category_map:
+                            category_map[current_supplier_id] = {}
+                    except ValueError:
+                        current_supplier_id = None
+                        continue
+                
+                # 2. Якщо це рядок-правило (наприклад, ,"Ляльки","Кукли","Надувні","Надувні ляльки")
+                elif current_supplier_id is not None and len(row) >= 5:
+                    
+                    # Ключі для мапи: (name_1, name_2, name_3) - всі в нижньому регістрі
+                    key_tuple = (
+                        row[1].strip().lower(), 
+                        row[2].strip().lower(), 
+                        row[3].strip().lower()
+                    )
+                    
+                    # Значення: category (без зміни регістру)
+                    category_value = row[4].strip()
+                    
+                    category_map[current_supplier_id][key_tuple] = category_value
+
+        return category_map, raw_data
+    
+    except FileNotFoundError:
+        logging.warning(f"Файл категорій 'category.csv' не знайдено. Буде створено новий.")
+        return {}, [default_header]
+    except Exception as e:
+        logging.error(f"Виникла помилка при завантаженні category.csv: {e}")
+        return {}, [default_header]
+
+def save_category_csv(raw_data):
+    """
+    Зберігає оновлені сирі дані у category.csv.
+    """
+    category_path = get_config_path('category.csv')
+    try:
+        with open(category_path, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerows(raw_data)
+        logging.info("Файл категорій category.csv оновлено.")
+    except Exception as e:
+        logging.error(f"Помилка при збереженні файлу категорій category.csv: {e}")
+
+def load_poznachky_csv():
+    """
+    Завантажує статичний список позначок з poznachky.csv.
+    Повертає:
+    1. poznachky_list: Список унікальних позначок (у нижньому регістрі).
+    """
+    poznachky_path = get_config_path('poznachky.csv')
+    poznachky_list = []
+    
+    try:
+        with open(poznachky_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            
+            try:
+                # Пропускаємо заголовок "Poznachky"
+                next(reader) 
+            except StopIteration:
+                return []
+
+            for row in reader:
+                if row and row[0].strip():
+                    # Зберігаємо позначки у нижньому регістрі для універсального порівняння
+                    poznachky_list.append(row[0].strip().lower())
+
+        # Сортуємо від найдовших до найкоротших, щоб знайти найкраще співпадіння
+        poznachky_list.sort(key=len, reverse=True)
+        
+        return poznachky_list
+    
+    except FileNotFoundError:
+        logging.warning(f"Файл позначок 'poznachky.csv' не знайдено.")
+        return []
+    except Exception as e:
+        logging.error(f"Виникла помилка при завантаженні poznachky.csv: {e}")
+        return []

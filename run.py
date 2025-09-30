@@ -3,7 +3,8 @@ from scr.base_function import check_version, check_csv_data
 from scr.products import export_products, download_supplier_price_list, process_supplier_1_price_list, \
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
-from scr.suppliers_1 import find_new_products, find_product_data, parse_product_attributes, apply_final_standardization
+from scr.suppliers_1 import find_new_products, find_product_data, parse_product_attributes, apply_final_standardization, \
+                        fill_product_category
 
 
 def main():
@@ -104,6 +105,13 @@ def main():
         help="Застосувати фінальні правила заміни з attribute.csv до SL_new.csv."
     )
 
+    # ✨ НОВИЙ АРГУМЕНТ для заповнення категорій
+    parser.add_argument(
+        "--fill-categories",
+        action="store_true",
+        help="Заповнити колонку Q (Категорія) на основі комбінацій M, N, O та category.csv."
+    )
+
 
     # 3. Парсинг аргументів
     args = parser.parse_args()
@@ -164,6 +172,12 @@ def main():
     elif args.standardize_final:
         print("✅ Запускаю фінальну стандартизацію SL_new.csv...")
         apply_final_standardization()
+
+    # ✨ Додаємо новий elif блок для заповнення категорій
+    elif args.fill_categories:
+        print("🗂️ Запускаю заповнення категорій...")
+        fill_product_category()
+
 
     else:
         # Якщо аргументи не вказано, вивести довідку

@@ -8,8 +8,10 @@ import pandas as pd
 from bs4 import BeautifulSoup
 import random 
 import logging
-from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log_message_to_existing_file, load_attributes_csv, save_attributes_csv
+from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log_message_to_existing_file, load_attributes_csv, \
+                                save_attributes_csv, load_category_csv, save_category_csv, load_poznachky_csv
 from datetime import datetime, timedelta
+
 
 def find_new_products():
     """
@@ -388,7 +390,6 @@ def parse_product_attributes():
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 
-
 def apply_final_standardization():
     """
     Застосовує фінальні правила стандартизації з attribute.csv до файлу SL_new.csv.
@@ -497,4 +498,261 @@ def apply_final_standardization():
     except Exception as e:
         logging.error(f"Виникла непередбачена помилка під час фіналізації: {e}")
         if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+def fill_product_category():
+    """
+    1. Заповнює колонку Q (Категорія) на основі комбінацій M, N, O.
+    2. Заповнює колонку T (Позначки) на основі співпадінь у назві товару (G).
+    3. Заповнює колонку U (Rank Math Focus Keyword) очищеною назвою товару (G).
+    4. Заповнює колонки V, W, X, Y, AZ фіксованими значеннями.
+    5. Копіює перший абзац з H до Z (з урахуванням літерального \n).
+    6. Встановлює поточну дату у AX.
+    7. Встановлює значення pa_used із category.csv у колонку AV.
+    Працює лише з ID постачальника = 1.
+    """
+    log_message_to_existing_file()
+    logging.info("Починаю фінальне заповнення службових колонок у SL_new.csv...")
+
+    settings = load_settings()
+    try:
+        supliers_new_path = settings['paths']['csv_path_supliers_1_new'] 
+        FIXED_SUPPLIER_ID = 1 
+        
+        # Отримання значення для колонки V (name_ukr)
+        name_ukr_value = settings['suppliers']['1']['name_ukr'] 
+        
+        # Індекси колонок SL_new.csv:
+        name_1_index = 12       # M
+        name_2_index = 13       # N
+        name_3_index = 14       # O
+        product_name_index = 6  # G (Ім'я товару)
+        description_index = 7   # H (Опис)
+        category_index = 16     # Q (Категорія)
+        poznachky_index = 19    # T (Позначки)
+        rank_math_index = 20    # U (Rank Math Focus Keyword)
+        
+        # --- НОВІ ІНДЕКСИ (ВНЕСЕНІ ЗМІНИ) ---
+        v_index = 21            # V (name_ukr)
+        w_index = 22            # W (фіксоване "0")
+        x_index = 23            # X (фіксоване "yes")
+        y_index = 24            # Y (фіксоване "none")
+        z_index = 25            # Z (Короткий опис)
+        av_index = 47           # AV (pa_used)
+        ax_index = 49           # AX (Дата)
+        az_index = 51           # AZ (Тип товару, "simple")
+        # ---------------------
+        
+        # Оновлюємо максимальний індекс
+        max_col_index = max(name_1_index, name_2_index, name_3_index, category_index, product_name_index, poznachky_index, rank_math_index, v_index, w_index, x_index, y_index, z_index, av_index, ax_index, az_index, description_index)
+        
+    except (TypeError, KeyError) as e:
+        logging.error(f"Помилка доступу до налаштувань. Перевірте settings.json: {e}")
+        return
+
+    # Завантаження правил категорій та позначок
+    category_map, raw_data_category = load_category_csv()
+    changes_made_category = False 
+    max_raw_row_len_category = len(raw_data_category[0]) if raw_data_category and raw_data_category[0] else 5
+    rules_category = category_map.get(FIXED_SUPPLIER_ID, {})
+    poznachky_list = load_poznachky_csv() 
+    
+    # === СТВОРЕННЯ МАПИ ДЛЯ AV (pa_used) ===
+    pa_used_map = {}
+    supplier_id_str = str(FIXED_SUPPLIER_ID)
+    
+    # category.csv має колонки: postachalnyk(0), name_1(1), name_2(2), name_3(3), category(4), pa_used(5)
+    for row in raw_data_category:
+        # Перевіряємо, чи рядок має мінімум 6 колонок
+        if len(row) > 5:
+            postachalnyk_value = row[0].strip()
+            
+            # ВАЖЛИВА ЗМІНА: Додаємо правило, якщо постачальник - "1" АБО порожній ""
+            is_valid_supplier = (postachalnyk_value == supplier_id_str) or (postachalnyk_value == '')
+            
+            if is_valid_supplier:
+                # Ключ: (name_1, name_2, name_3) у нижньому регістрі
+                key = tuple(v.strip().lower() for v in row[1:4])
+                # Значення: pa_used (індекс 5)
+                # Якщо правило з ID=1 вже є, порожнє правило його НЕ замінить.
+                # Якщо пусте правило вже є, правило з ID=1 його ЗАМІНИТЬ (якщо ми йдемо по порядку CSV).
+                # Оскільки rules_category (для Q) використовує логіку злиття, ми просто додаємо.
+                pa_used_map[key] = row[5].strip()
+            
+    logging.info(f"Створено pa_used_map. Знайдено {len(pa_used_map)} правил (включно з правилами без ID постачальника).")
+    # =======================================
+
+    # Визначаємо поточну дату у потрібному форматі (AX)
+    current_date_str = datetime.now().strftime('%Y-%m-%dT00:00:00') 
+    
+    # === ХЕЛПЕР: Пошук місця для вставки нового правила категорії ===
+    def get_category_insertion_point(supplier_id, raw_data):
+        insert_row_index = len(raw_data)
+        found_block = False
+        
+        for i, row in enumerate(raw_data):
+            if row and row[0].strip().isdigit():
+                try:
+                    current_id = int(row[0].strip())
+                    
+                    if current_id == supplier_id:
+                        found_block = True
+                        insert_row_index = i + 1 
+                    
+                    elif current_id > supplier_id and found_block:
+                        return i
+                    
+                except ValueError:
+                    continue
+            
+            elif found_block:
+                insert_row_index = i + 1 
+
+        return insert_row_index
+    # ===============================================================
+
+    try:
+        temp_file_path = supliers_new_path + '.category_temp' 
+        
+        with open(supliers_new_path, mode='r', encoding='utf-8') as input_file, \
+             open(temp_file_path, mode='w', encoding='utf-8', newline='') as output_file:
+            
+            reader = csv.reader(input_file)
+            writer = csv.writer(output_file)
+            
+            headers = next(reader)
+            writer.writerow(headers)
+            
+
+            for idx, row in enumerate(reader):
+                
+                # Гарантуємо, що рядок достатньої довжини
+                if len(row) <= max_col_index:
+                    row.extend([''] * (max_col_index + 1 - len(row)))
+
+                # Отримання назви товару та опису
+                product_name = row[product_name_index].strip()
+                product_description = row[description_index]
+                
+                # Обчислюємо ключ, який буде використаний і для Q, і для AV
+                key_values = (row[name_1_index].strip(), row[name_2_index].strip(), row[name_3_index].strip())
+                search_key = tuple(v.lower() for v in key_values)
+                
+                # ===============================================
+                #           ЛОГІКА ЗАПОВНЕННЯ КАТЕГОРІЇ (Q/16)
+                # ===============================================
+                category_value = rules_category.get(search_key)
+                
+                if category_value is not None:
+                    if category_value:
+                        row[category_index] = category_value
+                    else:
+                        row[category_index] = ""
+                else:
+                    insert_index = get_category_insertion_point(FIXED_SUPPLIER_ID, raw_data_category)
+                    # NOTE: Тут додається новий рядок без ID постачальника в index 0! 
+                    new_raw_row = [''] + list(key_values) + [''] * (max_raw_row_len_category - 4)
+                    raw_data_category.insert(insert_index, new_raw_row)
+                    rules_category[search_key] = "" # Оновлюємо мапу для уникнення дублікатів
+                    changes_made_category = True 
+                    logging.warning(f"Рядок {idx + 2}: НОВА КОМБІНАЦІЯ КАТЕГОРІЇ: {key_values} додано.")
+                    
+                
+                # ===============================================
+                #           ЛОГІКА ЗАПОВНЕННЯ ПОЗНАЧОК (T/19)
+                # ... (без змін) ...
+                found_tags = []
+                if product_name and poznachky_list:
+                    search_name = product_name.lower()
+                    covered_ranges = [] 
+                    
+                    for tag in poznachky_list:
+                        tag_len = len(tag)
+                        if tag in search_name:
+                            start_index = search_name.find(tag)
+                            end_index = start_index + tag_len
+                            
+                            is_covered = False
+                            for covered_start, covered_end in covered_ranges:
+                                if start_index >= covered_start and end_index <= covered_end:
+                                    is_covered = True
+                                    break
+                                
+                            if not is_covered:
+                                found_tags.append(tag.capitalize()) 
+                                covered_ranges.append((start_index, end_index))
+                                covered_ranges.sort(key=lambda x: x[1] - x[0], reverse=True)
+
+                    if found_tags:
+                        row[poznachky_index] = ', '.join(found_tags)
+                        
+                        
+                # ===============================================
+                #           ЛОГІКА ЗАПОВНЕННЯ RANK MATH (U/20)
+                # ... (без змін) ...
+                if product_name:
+                    cleaned_name = re.sub(r'[а-яА-Я]', '', product_name)
+                    cleaned_name = re.sub(r'[0-9]', '', cleaned_name)
+                    cleaned_name = re.sub(r'[^a-zA-Z\s]', '', cleaned_name)
+                    cleaned_name = re.sub(r'\s+', ' ', cleaned_name).strip()
+                    row[rank_math_index] = cleaned_name
+
+
+                # ===============================================
+                #           ЛОГІКА ЗАПОВНЕННЯ AV (pa_used)
+                # ===============================================
+                pa_used_value = pa_used_map.get(search_key)
+                
+                if pa_used_value:
+                    row[av_index] = pa_used_value
+                    logging.info(f"Рядок {idx + 2}: AV (pa_used) УСПІШНО ЗАПОВНЕНО значенням: '{pa_used_value}'. Ключ: {search_key}")
+                else:
+                    logging.warning(f"Рядок {idx + 2}: AV (pa_used) не заповнено. Шуканий ключ: {search_key}. (Знайдено правил: {len(pa_used_map)})")
+
+                
+                # ===============================================
+                #           ЛОГІКА ЗАПОВНЕННЯ ФІКСОВАНИХ КОЛОНОК
+                # ===============================================
+                
+                # V (21): Значення з settings.json
+                row[v_index] = name_ukr_value
+                
+                # W (22): Фіксоване "0"
+                row[w_index] = "0"
+                
+                # X (23): Фіксоване "yes"
+                row[x_index] = "yes"
+                
+                # Y (24): Фіксоване "none"
+                row[y_index] = "none"
+                
+                # AZ (51): Фіксоване "simple"
+                row[az_index] = "simple"
+                
+                # AX (49): Сьогоднішня дата
+                row[ax_index] = current_date_str
+                
+                # Z (25): Копіювати H(7) до першого абзацу
+                if product_description:
+                    # Шукаємо літеральну послідовність символів '\n'
+                    first_paragraph = product_description.split('\\n', 1)[0]
+                    
+                    row[z_index] = first_paragraph.strip()
+                else:
+                    row[z_index] = ""
+                
+                
+                writer.writerow(row)
+
+        os.replace(temp_file_path, supliers_new_path)
+        logging.info("Заповнення категорій, позначок та ключових слів завершено. SL_new.csv оновлено.")
+
+        if changes_made_category:
+            save_category_csv(raw_data_category)
+        else:
+            logging.info("Збереження category.csv не потрібне. Змін: False.")
+
+    except Exception as e:
+        logging.error(f"Виникла непередбачена помилка під час заповнення: {e}")
+        if 'supliers_new_path' in locals() and os.path.exists(temp_file_path): 
             os.remove(temp_file_path)
