@@ -4,7 +4,7 @@ from scr.products import export_products, download_supplier_price_list, process_
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
 from scr.suppliers_1 import find_new_products, find_product_data, parse_product_attributes, apply_final_standardization, \
-                        fill_product_category
+                        fill_product_category, refill_product_category  
 
 
 def main():
@@ -112,6 +112,12 @@ def main():
         help="Заповнити колонку Q (Категорія) на основі комбінацій M, N, O та category.csv."
     )
 
+    # ✨ НОВИЙ АРГУМЕНТ для ПОВТОРНОГО заповнення категорій
+    parser.add_argument( # <--- ДОДАНО
+        "--refill-category",
+        action="store_true",
+        help="Повторно заповнити колонки Категорія (Q) та pa_used (AV) на основі оновлених правил у category.csv."
+    )
 
     # 3. Парсинг аргументів
     args = parser.parse_args()
@@ -177,6 +183,11 @@ def main():
     elif args.fill_categories:
         print("🗂️ Запускаю заповнення категорій...")
         fill_product_category()
+   
+    # ✨ Додаємо новий elif блок для ПОВТОРНОГО заповнення
+    elif args.refill_category: # <--- ДОДАНО
+        print("🔄 Запускаю повторне заповнення категорій та pa_used...")
+        refill_product_category()
 
 
     else:

@@ -512,7 +512,7 @@ def fill_product_category():
     Працює лише з ID постачальника = 1.
     """
     log_message_to_existing_file()
-    logging.info("Починаю фінальне заповнення службових колонок у SL_new.csv...")
+    logging.info("Починаю фінальне заповнення службових колонок у csv...")
 
     settings = load_settings()
     try:
@@ -522,7 +522,7 @@ def fill_product_category():
         # Отримання значення для колонки V (name_ukr)
         name_ukr_value = settings['suppliers']['1']['name_ukr'] 
         
-        # Індекси колонок SL_new.csv:
+        # Індекси колонок csv:
         name_1_index = 12       # M
         name_2_index = 13       # N
         name_3_index = 14       # O
@@ -660,7 +660,7 @@ def fill_product_category():
                 
                 # ===============================================
                 #           ЛОГІКА ЗАПОВНЕННЯ ПОЗНАЧОК (T/19)
-                # ... (без змін) ...
+                # ===============================================
                 found_tags = []
                 if product_name and poznachky_list:
                     search_name = product_name.lower()
@@ -689,7 +689,7 @@ def fill_product_category():
                         
                 # ===============================================
                 #           ЛОГІКА ЗАПОВНЕННЯ RANK MATH (U/20)
-                # ... (без змін) ...
+                # ===============================================
                 if product_name:
                     cleaned_name = re.sub(r'[а-яА-Я]', '', product_name)
                     cleaned_name = re.sub(r'[0-9]', '', cleaned_name)
@@ -756,3 +756,130 @@ def fill_product_category():
         logging.error(f"Виникла непередбачена помилка під час заповнення: {e}")
         if 'supliers_new_path' in locals() and os.path.exists(temp_file_path): 
             os.remove(temp_file_path)
+
+def refill_product_category():
+    """
+    Повторно заповнює колонки Q (Категорія) та AV (pa_used) 
+    на основі оновлених правил у category.csv.
+    НЕ додає нові порожні рядки до category.csv.
+    """
+    log_message_to_existing_file()
+    logging.info("Починаю повторне заповнення категорій та pa_used у SL_new.csv...")
+
+    settings = load_settings()
+    try:
+# ... (блок ініціалізації індексів та змінних без змін) ...
+        supliers_new_path = settings['paths']['csv_path_supliers_1_new'] 
+        FIXED_SUPPLIER_ID = 1 
+        
+        # Індекси колонок SL_new.csv:
+        name_1_index = 12       # M
+        name_2_index = 13       # N
+        name_3_index = 14       # O
+        category_index = 16     # Q (Категорія)
+        av_index = 47           # AV (pa_used)
+        
+        # Визначаємо максимальний індекс, щоб забезпечити довжину рядка
+        max_col_index = max(name_1_index, name_2_index, name_3_index, category_index, av_index)
+        
+    except (TypeError, KeyError) as e:
+        logging.error(f"Помилка доступу до налаштувань. Перевірте settings.json: {e}")
+        return
+
+    # Завантаження правил категорій. Нам потрібні category_map та raw_data_category для pa_used.
+    category_map, raw_data_category = load_category_csv()
+    
+    rules_category = {}
+    pa_used_map = {}
+    supplier_id_str = str(FIXED_SUPPLIER_ID)
+
+    for row in raw_data_category:
+        if len(row) > 5:
+            postachalnyk_value = row[0].strip()
+            
+            # Включаємо правила з ID=1 АБО порожнім ID
+            is_valid_supplier = (postachalnyk_value == supplier_id_str) or (postachalnyk_value == '')
+            
+            if is_valid_supplier:
+                key = tuple(v.strip().lower() for v in row[1:4])
+                
+                # Мапа для Категорії (Q)
+                if len(row) > 4:
+                    rules_category[key] = row[4].strip() 
+                
+                # Мапа для pa_used (AV)
+                if len(row) > 5:
+                    pa_used_map[key] = row[5].strip()
+    
+    logging.info(f"Зчитано {len(rules_category)} правил для Категорії (Q) та {len(pa_used_map)} правил для pa_used (AV).")
+
+
+    try:
+        temp_file_path = supliers_new_path + '.refill_temp' 
+        updated_rows_count = 0
+        
+        with open(supliers_new_path, mode='r', encoding='utf-8') as input_file, \
+             open(temp_file_path, mode='w', encoding='utf-8', newline='') as output_file:
+            
+            reader = csv.reader(input_file)
+            writer = csv.writer(output_file)
+            
+            headers = next(reader)
+            writer.writerow(headers)
+            
+
+            for idx, row in enumerate(reader):
+                
+                if len(row) <= max_col_index:
+                    row.extend([''] * (max_col_index + 1 - len(row)))
+
+                # 1. Готуємо ключ пошуку (M, N, O)
+                key_values = (row[name_1_index].strip(), row[name_2_index].strip(), row[name_3_index].strip())
+                search_key = tuple(v.lower() for v in key_values)
+                
+                initial_category = row[category_index].strip()
+                initial_pa_used = row[av_index].strip()
+                row_changed = False
+                
+                # ===============================================
+                #           ПОВТОРНЕ ЗАПОВНЕННЯ КАТЕГОРІЇ (Q/16)
+                # ===============================================
+                category_value = rules_category.get(search_key)
+                
+                if category_value and category_value != initial_category: # Перевірка, що не порожнє і не те саме
+                    row[category_index] = category_value
+                    row_changed = True
+                    # ЗМІНА ЛОГУВАННЯ
+                    logging.info(f"Рядок {idx + 2}: Q (Категорія) оновлено. Ключ: {search_key}. Значення: '{category_value}'")
+                
+                
+                # ===============================================
+                #           ПОВТОРНЕ ЗАПОВНЕННЯ AV (pa_used/47)
+                # ===============================================
+                pa_used_value = pa_used_map.get(search_key)
+                
+                if pa_used_value and pa_used_value != initial_pa_used: # Перевірка, що не порожнє і не те саме
+                    row[av_index] = pa_used_value
+                    row_changed = True
+                    # ЗМІНА ЛОГУВАННЯ
+                    logging.info(f"Рядок {idx + 2}: AV (pa_used) оновлено. Ключ: {search_key}. Значення: '{pa_used_value}'")
+                
+                if row_changed:
+                    updated_rows_count += 1
+
+                writer.writerow(row)
+
+        os.replace(temp_file_path, supliers_new_path)
+        logging.info(f"Повторне заповнення завершено. У csv оновлено {updated_rows_count} рядків.")
+
+
+    except Exception as e:
+        logging.error(f"Виникла непередбачена помилка під час повторного заповнення: {e}")
+        if 'supliers_new_path' in locals() and os.path.exists(temp_file_path): 
+            os.remove(temp_file_path)
+
+
+
+
+
+
