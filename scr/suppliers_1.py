@@ -1336,7 +1336,6 @@ def download_images_for_product():
     
     logging.info("Весь процес обробки зображень успішно виконано.")
 
-
 def convert_to_webp_and_resize():
     """
     Конвертує всі зображення з JPG-папки у формат WEBP, змінюючи їх розмір
