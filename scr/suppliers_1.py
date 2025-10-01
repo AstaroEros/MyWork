@@ -8,6 +8,7 @@ import pandas as pd
 import mimetypes
 from bs4 import BeautifulSoup
 import random 
+from PIL import Image
 import logging
 from typing import Dict, Tuple, List, Optional
 from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log_message_to_existing_file, load_attributes_csv, \
@@ -1336,4 +1337,79 @@ def download_images_for_product():
     logging.info("Весь процес обробки зображень успішно виконано.")
 
 
+def convert_to_webp_and_resize():
+    """
+    Конвертує всі зображення з JPG-папки у формат WEBP, змінюючи їх розмір
+    до квадратної форми шляхом додавання білого тла.
+    Результат зберігається у відповідній структурі папок у WEBP-папці.
+    """
+    log_message_to_existing_file()
+    logging.info("Починаю конвертацію та модифікацію розмірів зображень у формат WEBP.")
 
+    settings = load_settings()
+    try:
+        base_jpg_path = settings['paths']['img_path_jpg']
+        webp_dest_path = settings['paths']['img_path_webp']
+    except KeyError as e:
+        logging.error(f"Помилка конфігурації. Не знайдено шлях у settings: {e}")
+        return
+
+    processed_count = 0
+    
+    # 1. Обхід всіх файлів у JPG-папці (включаючи підпапки категорій)
+    for root, _, files in os.walk(base_jpg_path):
+        
+        # Визначаємо відносний шлях, щоб зберегти структуру папок категорій
+        relative_path = os.path.relpath(root, base_jpg_path)
+        target_dir = os.path.join(webp_dest_path, relative_path)
+        
+        # Створюємо відповідну цільову папку у WEBP-структурі
+        os.makedirs(target_dir, exist_ok=True)
+
+        for file in files:
+            # Обробляємо лише файли, які не є GIF, оскільки GIF ми вже перемістили
+            if file.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                
+                source_file_path = os.path.join(root, file)
+                # Нове ім'я файлу: зберігаємо оригінальне ім'я, але змінюємо розширення на .webp
+                new_file_name = os.path.splitext(file)[0] + '.webp'
+                target_file_path = os.path.join(target_dir, new_file_name)
+                
+                try:
+                    img = Image.open(source_file_path)
+                    width, height = img.size
+                    
+                    # Визначаємо розмір квадрата (беремо більшу сторону)
+                    max_dim = max(width, height)
+                    
+                    # Якщо зображення вже квадратне, просто конвертуємо
+                    if width == height:
+                        pass 
+                    else:
+                        # Створюємо нове біле квадратне зображення
+                        new_img = Image.new('RGB', (max_dim, max_dim), color='white')
+                        
+                        # Розраховуємо зсув для центрування
+                        # dx: зміщення по горизонталі (зліва)
+                        # dy: зміщення по вертикалі (зверху)
+                        dx = (max_dim - width) // 2
+                        dy = (max_dim - height) // 2
+                        
+                        # Вставляємо оригінальне зображення по центру
+                        new_img.paste(img, (dx, dy))
+                        
+                        # Замінюємо оригінальне зображення на модифіковане
+                        img = new_img
+
+                    # 2. Конвертація та збереження у WEBP
+                    # Якість 90 - хороший баланс між розміром та якістю
+                    img.save(target_file_path, 'webp', quality=90)
+                    processed_count += 1
+                    logging.debug(f"Конвертовано та модифіковано: {file} -> {new_file_name} в {target_dir}")
+                    
+                except FileNotFoundError:
+                    logging.warning(f"Файл не знайдено: {source_file_path}")
+                except Exception as e:
+                    logging.error(f"Помилка обробки файлу {source_file_path}: {e}")
+                    
+    logging.info(f"Конвертацію зображень завершено. Успішно оброблено {processed_count} файлів.")

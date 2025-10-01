@@ -5,7 +5,7 @@ from scr.products import export_products, download_supplier_price_list, process_
                         prepare_for_website_upload, update_products
 from scr.suppliers_1 import find_new_products, find_product_data, parse_product_attributes, apply_final_standardization, \
                         fill_product_category, refill_product_category, separate_existing_products, assign_new_sku_to_products, \
-                        download_images_for_product
+                        download_images_for_product, convert_to_webp_and_resize
 
 
 def main():
@@ -141,6 +141,14 @@ def main():
     help="Комплексний процес: Завантаження зображень з URL (B/1) у папки категорій (Q/16), перейменування за SKU (P/15), оновлення SL_new.csv (R/17) та сортування GIF-файлів."
 )
 
+# ✨ НОВИЙ АРГУМЕНТ для конвертації та модифікації розміру зображень у WEBP
+    parser.add_argument( 
+    "--convert-webp",
+    action="store_true",
+    help="Конвертувати всі зображення з JPG-папки у формат WEBP, збільшуючи розміри до квадрата з білим тлом для центровки."
+)
+
+
 
 
     # 3. Парсинг аргументів
@@ -228,6 +236,14 @@ def main():
     elif args.download_images:
         print("🖼️ Запускаю комплексний процес завантаження, перейменування та сортування зображень...")
         download_images_for_product()
+
+    # ✨ Додаємо новий elif блок для конвертації WEBP
+    elif args.convert_webp:
+        print("🖼️ Запускаю конвертацію та модифікацію зображень у WEBP...")
+        convert_to_webp_and_resize()
+
+
+
 
     else:
         # Якщо аргументи не вказано, вивести довідку
