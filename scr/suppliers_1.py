@@ -1124,25 +1124,30 @@ def assign_new_sku_to_products():
 
 def download_images_for_product():
     """
-    Комплексний процес: 
-    1. ОЧИЩЕННЯ папок JPG та WEBP.
-    2. Обробляє 1.csv, скачує зображення товарів у підпапки за категоріями (JPG-папка).
-    3. Оновлює 1.csv (колонка R/17) іменами файлів.
-    4. Переміщує всі .gif файли до WEBP-папки.
+    Комплексний процес обробки та розгортання зображень:
+    1. Очищення папок. 2. Завантаження (JPG-папка). 
+    3. Переміщення GIF. 4. Конвертація у WEBP та квадрат (WEBP-папка). 
+    5. Оновлення SL_new.csv (S/18). 
+    6. Копіювання WEBP/GIF на сайт (/wp-content/uploads/products).
     """
-    # --- КОНСТАНТИ ІНДЕКСІВ 1.csv ---
+    # --- КОНСТАНТИ ІНДЕКСІВ SL_new.csv ---
     URL_INDEX = 1        # B (URL товару)
     SKU_INDEX = 15       # P (SKU для імені файлу)
     CATEGORY_INDEX = 16  # Q (Категорія для папки)
-    IMAGES_LIST_INDEX = 17 # R (Сюди записуємо імена файлів)
+    IMAGES_LIST_INDEX = 17 # R (Список JPG-файлів)
+    WEBP_LIST_INDEX = 18   # S (Список WEBP/GIF-файлів)
+
+    # --- КОНСТАНТА ДЛЯ ШЛЯХУ НА САЙТІ ---
+    SITE_UPLOADS_PATH = "/var/www/html/erosinua/public_html/wp-content/uploads/products" 
 
 
 
     # -----------------------------------------------------------
-    # --- ВНУТРІШНЯ ДОПОМІЖНА ФУНКЦІЯ: ОЧИЩЕННЯ ПАПКИ ---
+    # --- ВНУТРІШНІ ДОПОМІЖНІ ФУНКЦІЇ ---
     # -----------------------------------------------------------
+
     def _clear_directory_contents(folder_path: str):
-        """Безпечно видаляє весь вміст (файли та папки) всередині заданої директорії."""
+        """Безпечно видаляє весь вміст всередині директорії."""
         if not os.path.exists(folder_path):
             os.makedirs(folder_path, exist_ok=True)
             return
@@ -1159,41 +1164,29 @@ def download_images_for_product():
                 logging.error(f'Не вдалося видалити {item_path}. Причина: {e}')
         logging.info("Очищення завершено.")
 
-    # -----------------------------------------------------------
-    # --- ВНУТРІШНЯ ДОПОМІЖНА ФУНКЦІЯ: ЛОГІКА ПЕРЕМІЩЕННЯ GIF ---
-    # -----------------------------------------------------------
     def _move_gif_files(base_jpg_path: str, webp_dest_path: str):
         """Шукає GIF-файли у підпапках base_jpg_path і переміщує їх до webp_dest_path."""
         if not os.path.exists(webp_dest_path):
             os.makedirs(webp_dest_path, exist_ok=True)
             
-        logging.info(f"Крок 3/3: Починаю переміщення GIF-файлів...")
+        logging.info("Крок 3/6: Починаю переміщення GIF-файлів...")
         moved_count = 0
-        
         try:
             for root, _, files in os.walk(base_jpg_path):
-                if root == base_jpg_path:
-                    continue 
-                    
+                if root == base_jpg_path: continue 
                 for file in files:
                     if file.lower().endswith('.gif'):
                         source_path = os.path.join(root, file)
                         relative_path = os.path.relpath(source_path, base_jpg_path)
                         dest_path = os.path.join(webp_dest_path, relative_path)
-                        
                         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
                         shutil.move(source_path, dest_path)
                         moved_count += 1
-                        logging.debug(f"Переміщено GIF: {relative_path}")
-                        
             logging.info(f"Переміщення GIF-файлів завершено. Переміщено {moved_count} файлів.")
         except Exception as e:
             logging.error(f"Помилка під час переміщення GIF-файлів: {e}")
 
-    # -----------------------------------------------------------
-    # --- ВНУТРІШНЯ ДОПОМІЖНА ФУНКЦІЯ: ЗАВАНТАЖЕННЯ ОДНОГО ТОВАРУ ---
-    # -----------------------------------------------------------
-    def _download_single_product_images(
+    def _download_images(
         url: str, 
         base_jpg_folder: str, 
         category_name: str, 
@@ -1201,7 +1194,6 @@ def download_images_for_product():
         categories_map: Dict[str, str]
     ) -> Optional[List[str]]:
         """Парсить, завантажує зображення та зберігає їх у папку категорії (в base_jpg_folder)."""
-        
         folder_slug = categories_map.get(category_name.strip())
         if not folder_slug:
             folder_slug = category_name.strip().lower().replace(' ', '_').replace(',', '')
@@ -1226,17 +1218,12 @@ def download_images_for_product():
             try:
                 img_response = requests.get(img_url, timeout=10)
                 img_response.raise_for_status()
-                
                 mime_type = img_response.headers.get('Content-Type')
                 
-                if mime_type == 'image/webp':
-                    ext = '.webp'
-                elif mime_type == 'image/png':
-                    ext = '.png'
-                elif mime_type == 'image/gif':
-                    ext = '.gif'
-                else:
-                    ext = mimetypes.guess_extension(mime_type) or '.jpg' 
+                if mime_type == 'image/webp': ext = '.webp'
+                elif mime_type == 'image/png': ext = '.png'
+                elif mime_type == 'image/gif': ext = '.gif'
+                else: ext = mimetypes.guess_extension(mime_type) or '.jpg' 
                 
                 file_name = f"{product_sku}-{idx}{ext}"
                 file_path = os.path.join(target_path, file_name)
@@ -1246,19 +1233,144 @@ def download_images_for_product():
                 
                 filenames.append(file_name)
                 
-            except requests.RequestException as e:
-                logging.warning(f"Не вдалося завантажити зображення {img_url} для SKU {product_sku}: {e}")
+            except requests.RequestException:
+                pass
             except Exception as e:
                 logging.error(f"Непередбачена помилка при збереженні зображення {img_url}: {e}")
                 
         return filenames
-    
+
+
+    def _convert_and_resize(base_jpg_path: str, webp_dest_path: str):
+        """Конвертує всі зображення з JPG-папки у WEBP та робить їх квадратними."""
+        logging.info("Крок 4/6: Починаю конвертацію та модифікацію розмірів у WEBP.")
+        processed_count = 0
+        
+        for root, _, files in os.walk(base_jpg_path):
+            relative_path = os.path.relpath(root, base_jpg_path)
+            target_dir = os.path.join(webp_dest_path, relative_path)
+            os.makedirs(target_dir, exist_ok=True)
+
+            for file in files:
+                if file.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                    source_file_path = os.path.join(root, file)
+                    new_file_name = os.path.splitext(file)[0] + '.webp'
+                    target_file_path = os.path.join(target_dir, new_file_name)
+                    
+                    try:
+                        img = Image.open(source_file_path)
+                        width, height = img.size
+                        max_dim = max(width, height)
+                        
+                        if width != height:
+                            new_img = Image.new('RGB', (max_dim, max_dim), color='white')
+                            dx = (max_dim - width) // 2
+                            dy = (max_dim - height) // 2
+                            new_img.paste(img, (dx, dy))
+                            img = new_img
+
+                        img.save(target_file_path, 'webp', quality=90)
+                        processed_count += 1
+                        
+                    except Exception as e:
+                        logging.error(f"Помилка обробки файлу {source_file_path} під час WEBP-конвертації: {e}")
+                        
+        logging.info(f"WEBP-конвертацію завершено. Успішно оброблено {processed_count} файлів.")
+
+
+    def _copy_webp_to_site_folder(source_webp_path: str, site_uploads_path: str):
+        """
+        Копіює WEBP/GIF зображення з робочої папки до папки на сайті, 
+        зберігаючи структуру, та логує кількість файлів по папках.
+        """
+        logging.info("Крок 6/6: Копіювання WEBP/GIF зображень до кінцевої папки на сайті.")
+        copied_count = 0
+        folder_copy_counts: Dict[str, int] = {}
+        
+        if not os.path.isdir(site_uploads_path):
+            try:
+                os.makedirs(site_uploads_path, exist_ok=True)
+                logging.warning(f"Створено кінцеву папку на сайті: {site_uploads_path}")
+            except OSError as e:
+                logging.critical(f"Критична помилка: Не вдалося отримати доступ до папки сайту: {site_uploads_path}. {e}")
+                return 0
+
+        for root, _, files in os.walk(source_webp_path):
+            relative_path = os.path.relpath(root, source_webp_path)
+            destination_dir = os.path.join(site_uploads_path, relative_path)
+            
+            # Якщо це папка категорії (не корінь)
+            if relative_path != ".":
+                os.makedirs(destination_dir, exist_ok=True)
+
+            current_folder_count = 0
+            
+            for file in files:
+                if file.lower().endswith(('.webp', '.gif')):
+                    source_file = os.path.join(root, file)
+                    destination_file = os.path.join(destination_dir, file)
+                    
+                    try:
+                        # Копіювання з метаданими
+                        shutil.copy2(source_file, destination_file)
+                        copied_count += 1
+                        current_folder_count += 1
+                    except Exception as e:
+                        logging.error(f"Помилка копіювання файлу {source_file}: {e}")
+
+            if current_folder_count > 0 and relative_path != ".":
+                folder_copy_counts[relative_path] = current_folder_count
+
+        # Логування результатів
+        logging.info("--- Результати копіювання по папках ---")
+        for folder, count in folder_copy_counts.items():
+            logging.info(f"Папка '{folder}': перенесено {count} файлів.")
+        logging.info("---------------------------------------")
+        
+        logging.info(f"Копіювання завершено. Успішно скопійовано {copied_count} файлів до {site_uploads_path}.")
+        return copied_count
+
+
+    def _sync_webp_list_to_csv(sl_new_path: str, webp_dest_path: str, rows_to_keep: List[List[str]]) -> List[List[str]]:
+        """Синхронізує імена WEBP/GIF файлів з папки до колонки S(18)."""
+        logging.info("Крок 5/6: Синхронізація імен WEBP/GIF-файлів у SL_new.csv (колонка S/18).")
+        
+        # Створюємо мапу {SKU: [list_of_filenames]} шляхом сканування WEBP-папки
+        sku_to_webp_files = {}
+        for root, _, files in os.walk(webp_dest_path):
+            for file in files:
+                parts = file.split('-')
+                if len(parts) >= 2:
+                    sku_part = parts[0].strip()
+                    if sku_part.isdigit():
+                        sku_to_webp_files.setdefault(sku_part, []).append(file)
+
+        final_rows_to_write = [rows_to_keep[0]] # Зберігаємо заголовок
+        sync_count = 0
+        
+        for row in rows_to_keep[1:]: # Пропускаємо заголовок
+            current_sku = row[SKU_INDEX].strip()
+            
+            if current_sku in sku_to_webp_files:
+                # Сортування для порядку 1, 2, 3...
+                filenames = sorted(sku_to_webp_files[current_sku], key=lambda x: int(x.split('-')[1].split('.')[0]))
+                row[WEBP_LIST_INDEX] = ', '.join(filenames)
+                sync_count += 1
+            else:
+                row[WEBP_LIST_INDEX] = '' 
+
+            final_rows_to_write.append(row)
+        
+        logging.info(f"Синхронізацію CSV завершено. Оновлено {sync_count} SKU.")
+        return final_rows_to_write
+
+
     # -----------------------------------------------------------
-    # --- ГОЛОВНИЙ ПОЧАТОК ФУНКЦІЇ ---
+    # --- ГОЛОВНИЙ ПОЧАТОК ЛОГІКИ ---
     # -----------------------------------------------------------
 
     log_message_to_existing_file()
-    logging.info("Починаю комплексний процес завантаження, сортування та очищення зображень...")
+    logging.info("Починаю комплексний процес обробки зображень (6 кроків)...")
 
     settings = load_settings()
     try:
@@ -1266,21 +1378,19 @@ def download_images_for_product():
         base_jpg_path = settings['paths']['img_path_jpg'] 
         webp_dest_path = settings['paths']['img_path_webp'] 
         categories_map = settings['categories']
-        
     except KeyError as e:
         logging.error(f"Помилка конфігурації. Не знайдено необхідний шлях/категорію в settings: {e}")
         return
     
-    # 1. КРОК ОЧИЩЕННЯ ПАПОК
+    # КРОК 1: ОЧИЩЕННЯ ПАПОК
     _clear_directory_contents(base_jpg_path)
     _clear_directory_contents(webp_dest_path)
 
-    MIN_ROW_LEN = IMAGES_LIST_INDEX + 1
+    MIN_ROW_LEN = max(IMAGES_LIST_INDEX, WEBP_LIST_INDEX) + 1
     temp_file_path = sl_new_path + '.temp_img'
     rows_to_keep = []
-    total_download_count = 0
     
-    # 2. ЦИКЛ ЗАВАНТАЖЕННЯ ЗОБРАЖЕНЬ ТА ОНОВЛЕННЯ CSV
+    # КРОК 2: ЦИКЛ ЗАВАНТАЖЕННЯ ЗОБРАЖЕНЬ (до JPG-папки)
     try:
         with open(sl_new_path, mode='r', encoding='utf-8') as input_file:
             reader = csv.reader(input_file)
@@ -1290,8 +1400,10 @@ def download_images_for_product():
                 header.extend([''] * (MIN_ROW_LEN - len(header)))
             rows_to_keep.append(header)
             
-            logging.info("Крок 2/3: Починаю завантаження зображень...")
-            for idx, row in enumerate(reader, start=1):
+            logging.info("Крок 2/6: Починаю завантаження зображень (до JPG-папки)...")
+            data_rows = list(reader)
+            
+            for idx, row in enumerate(data_rows, start=1):
                 
                 if len(row) < MIN_ROW_LEN:
                     row.extend([''] * (MIN_ROW_LEN - len(row)))
@@ -1300,115 +1412,42 @@ def download_images_for_product():
                 sku = row[SKU_INDEX].strip()
                 category = row[CATEGORY_INDEX].strip()
 
-                if not (url and sku and category):
-                    logging.warning(f"Рядок {idx}: Пропущено завантаження - відсутній URL, SKU({sku}) або Категорія({category}).")
-                    rows_to_keep.append(row)
-                    continue
-
-                filenames = _download_single_product_images(url, base_jpg_path, category, sku, categories_map)
-                
-                if filenames is not None:
-                    row[IMAGES_LIST_INDEX] = ', '.join(filenames)
-                    total_download_count += len(filenames)
-                else:
-                    row[IMAGES_LIST_INDEX] = 'Помилка завантаження'
+                if url and sku and category:
+                    filenames = _download_images(url, base_jpg_path, category, sku, categories_map)
+                    if filenames is not None:
+                        row[IMAGES_LIST_INDEX] = ', '.join(filenames) # Записуємо в R(17)
+                    else:
+                        row[IMAGES_LIST_INDEX] = 'Помилка завантаження'
 
                 rows_to_keep.append(row)
-                
                 time.sleep(random.uniform(0.5, 2)) 
-
-        # 3. Запис оновленого CSV
-        with open(temp_file_path, mode='w', encoding='utf-8', newline='') as output_file:
-            writer = csv.writer(output_file)
-            writer.writerows(rows_to_keep)
-        
-        os.replace(temp_file_path, sl_new_path)
-        logging.info(f"Крок 2/3 (Завантаження) завершено. Завантажено {total_download_count} зображень. Файл 1.csv оновлено.")
 
     except Exception as e:
         logging.error(f"Критична помилка під час обробки CSV/завантаження: {e}", exc_info=True)
+        return
+
+    # КРОК 3: ПЕРЕМІЩЕННЯ GIF-ФАЙЛІВ (З JPG до WEBP папки)
+    _move_gif_files(base_jpg_path, webp_dest_path)
+    
+    # КРОК 4: КОНВЕРТАЦІЯ У WEBP ТА КВАДРАТ (З JPG до WEBP папки)
+    _convert_and_resize(base_jpg_path, webp_dest_path)
+
+    # КРОК 5: СИНХРОНІЗАЦІЯ WEBP-ФАЙЛІВ У CSV (Колонка S/18)
+    final_rows_to_write = _sync_webp_list_to_csv(sl_new_path, webp_dest_path, rows_to_keep)
+    
+    # ФІНАЛЬНИЙ ЗАПИС CSV
+    try:
+        with open(temp_file_path, mode='w', encoding='utf-8', newline='') as output_file:
+            writer = csv.writer(output_file)
+            writer.writerows(final_rows_to_write)
+        os.replace(temp_file_path, sl_new_path)
+    except Exception as e:
+        logging.error(f"Критична помилка під час фінального запису CSV: {e}", exc_info=True)
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
         return
-
-    # 4. КРОК ПЕРЕМІЩЕННЯ GIF-ФАЙЛІВ
-    _move_gif_files(base_jpg_path, webp_dest_path)
     
-    logging.info("Весь процес обробки зображень успішно виконано.")
-
-def convert_to_webp_and_resize():
-    """
-    Конвертує всі зображення з JPG-папки у формат WEBP, змінюючи їх розмір
-    до квадратної форми шляхом додавання білого тла.
-    Результат зберігається у відповідній структурі папок у WEBP-папці.
-    """
-    log_message_to_existing_file()
-    logging.info("Починаю конвертацію та модифікацію розмірів зображень у формат WEBP.")
-
-    settings = load_settings()
-    try:
-        base_jpg_path = settings['paths']['img_path_jpg']
-        webp_dest_path = settings['paths']['img_path_webp']
-    except KeyError as e:
-        logging.error(f"Помилка конфігурації. Не знайдено шлях у settings: {e}")
-        return
-
-    processed_count = 0
-    
-    # 1. Обхід всіх файлів у JPG-папці (включаючи підпапки категорій)
-    for root, _, files in os.walk(base_jpg_path):
-        
-        # Визначаємо відносний шлях, щоб зберегти структуру папок категорій
-        relative_path = os.path.relpath(root, base_jpg_path)
-        target_dir = os.path.join(webp_dest_path, relative_path)
-        
-        # Створюємо відповідну цільову папку у WEBP-структурі
-        os.makedirs(target_dir, exist_ok=True)
-
-        for file in files:
-            # Обробляємо лише файли, які не є GIF, оскільки GIF ми вже перемістили
-            if file.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
-                
-                source_file_path = os.path.join(root, file)
-                # Нове ім'я файлу: зберігаємо оригінальне ім'я, але змінюємо розширення на .webp
-                new_file_name = os.path.splitext(file)[0] + '.webp'
-                target_file_path = os.path.join(target_dir, new_file_name)
-                
-                try:
-                    img = Image.open(source_file_path)
-                    width, height = img.size
-                    
-                    # Визначаємо розмір квадрата (беремо більшу сторону)
-                    max_dim = max(width, height)
-                    
-                    # Якщо зображення вже квадратне, просто конвертуємо
-                    if width == height:
-                        pass 
-                    else:
-                        # Створюємо нове біле квадратне зображення
-                        new_img = Image.new('RGB', (max_dim, max_dim), color='white')
-                        
-                        # Розраховуємо зсув для центрування
-                        # dx: зміщення по горизонталі (зліва)
-                        # dy: зміщення по вертикалі (зверху)
-                        dx = (max_dim - width) // 2
-                        dy = (max_dim - height) // 2
-                        
-                        # Вставляємо оригінальне зображення по центру
-                        new_img.paste(img, (dx, dy))
-                        
-                        # Замінюємо оригінальне зображення на модифіковане
-                        img = new_img
-
-                    # 2. Конвертація та збереження у WEBP
-                    # Якість 90 - хороший баланс між розміром та якістю
-                    img.save(target_file_path, 'webp', quality=90)
-                    processed_count += 1
-                    logging.debug(f"Конвертовано та модифіковано: {file} -> {new_file_name} в {target_dir}")
-                    
-                except FileNotFoundError:
-                    logging.warning(f"Файл не знайдено: {source_file_path}")
-                except Exception as e:
-                    logging.error(f"Помилка обробки файлу {source_file_path}: {e}")
-                    
-    logging.info(f"Конвертацію зображень завершено. Успішно оброблено {processed_count} файлів.")
+    # КРОК 6: КОПІЮВАННЯ НА САЙТ
+    _copy_webp_to_site_folder(webp_dest_path, SITE_UPLOADS_PATH)
+            
+    logging.info("✅ Весь комплексний процес обробки зображень успішно виконано.")
