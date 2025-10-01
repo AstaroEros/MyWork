@@ -4,7 +4,8 @@ from scr.products import export_products, download_supplier_price_list, process_
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
 from scr.suppliers_1 import find_new_products, find_product_data, parse_product_attributes, apply_final_standardization, \
-                        fill_product_category, refill_product_category, separate_existing_products, assign_new_sku_to_products
+                        fill_product_category, refill_product_category, separate_existing_products, assign_new_sku_to_products, \
+                        download_images_for_product
 
 
 def main():
@@ -133,6 +134,15 @@ def main():
     help="Знайти найбільший SKU у zalishki.csv та присвоїти послідовні SKU новим товарам у SL_new.csv (колонка P/15)."
     )
 
+# ✨ НОВИЙ АРГУМЕНТ для комплексного завантаження зображень
+    parser.add_argument(
+    "--download-images",
+    action="store_true",
+    help="Комплексний процес: Завантаження зображень з URL (B/1) у папки категорій (Q/16), перейменування за SKU (P/15), оновлення SL_new.csv (R/17) та сортування GIF-файлів."
+)
+
+
+
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -213,6 +223,11 @@ def main():
         print("🔢 Запускаю присвоєння нових SKU...")
         assign_new_sku_to_products()
 
+
+    # ✨ Додаємо новий elif блок для завантаження зображень
+    elif args.download_images:
+        print("🖼️ Запускаю комплексний процес завантаження, перейменування та сортування зображень...")
+        download_images_for_product()
 
     else:
         # Якщо аргументи не вказано, вивести довідку

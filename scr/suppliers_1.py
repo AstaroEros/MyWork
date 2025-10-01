@@ -5,6 +5,7 @@ import requests
 import shutil
 import re
 import pandas as pd
+import mimetypes
 from bs4 import BeautifulSoup
 import random 
 import logging
@@ -357,7 +358,7 @@ def parse_product_attributes():
                                     row[target_col_index] = attr_value
                                     
                                 elif attr_name == "Штрих-код":
-                                    # ОБРОБКА ШТРИХ-КОДУ: запис у SL_new.csv, ігнорування attribute.csv
+                                    # ОБРОБКА ШТРИХ-КОДУ: запис у 1.csv, ігнорування attribute.csv
                                     shk_index = product_data_map.get("Штрих-код")
                                     if shk_index is not None:
                                         row[shk_index] = attr_value.strip()
@@ -384,7 +385,7 @@ def parse_product_attributes():
                     time.sleep(random.uniform(1, 3))
 
         os.replace(temp_file_path, supliers_new_path)
-        logging.info("Парсинг атрибутів завершено. Файл SL_new.csv оновлено.")
+        logging.info("Парсинг атрибутів завершено. Файл 1.csv оновлено.")
 
         # Збереження оновлених сирих даних у CSV
         if changes_made:
@@ -399,13 +400,13 @@ def parse_product_attributes():
 
 def apply_final_standardization():
     """
-    Застосовує фінальні правила стандартизації з attribute.csv до файлу SL_new.csv.
+    Застосовує фінальні правила стандартизації з attribute.csv до файлу 1.csv.
     Замінює атрибути на значення з колонки 'attr_site_name', якщо воно існує.
     Проігноровані атрибути (з порожнім 'attr_site_name') очищаються.
     Атрибути, для яких не знайдено правил, залишаються без змін.
     """
     log_message_to_existing_file()
-    logging.info("Починаю фінальну стандартизацію атрибутів у SL_new.csv...")
+    logging.info("Починаю фінальну стандартизацію атрибутів у 1.csv...")
 
     settings = load_settings()
     try:
@@ -752,7 +753,7 @@ def fill_product_category():
                 writer.writerow(row)
 
         os.replace(temp_file_path, supliers_new_path)
-        logging.info("Заповнення категорій, позначок та ключових слів завершено. SL_new.csv оновлено.")
+        logging.info("Заповнення категорій, позначок та ключових слів завершено. 1.csv оновлено.")
 
         if changes_made_category:
             save_category_csv(raw_data_category)
@@ -771,7 +772,7 @@ def refill_product_category():
     НЕ додає нові порожні рядки до category.csv.
     """
     log_message_to_existing_file()
-    logging.info("Починаю повторне заповнення категорій та pa_used у SL_new.csv...")
+    logging.info("Починаю повторне заповнення категорій та pa_used у 1.csv...")
 
     settings = load_settings()
     try:
@@ -779,7 +780,7 @@ def refill_product_category():
         supliers_new_path = settings['paths']['csv_path_supliers_1_new'] 
         FIXED_SUPPLIER_ID = 1 
         
-        # Індекси колонок SL_new.csv:
+        # Індекси колонок 1.csv:
         name_1_index = 12       # M
         name_2_index = 13       # N
         name_3_index = 14       # O
@@ -887,11 +888,11 @@ def refill_product_category():
 
 def separate_existing_products():
     """
-    Звіряє штрихкоди (C/2) SL_new.csv з базою (zalishki.csv),
-    переносить знайдені товари у SL_old_prod_new_SHK.csv та видаляє їх з SL_new.csv.
+    Звіряє штрихкоди (C/2) 1.csv з базою (zalishki.csv),
+    переносить знайдені товари у SL_old_prod_new_SHK.csv та видаляє їх з 1.csv.
     """
     log_message_to_existing_file()
-    logging.info("Починаю звірку SL_new.csv зі штрихкодами бази (zalishki.csv)...")
+    logging.info("Починаю звірку 1.csv зі штрихкодами бази (zalishki.csv)...")
 
     settings = load_settings()
     try:
@@ -956,7 +957,7 @@ def separate_existing_products():
         logging.error(f"Помилка при читанні zalishki.csv: {e}")
         return
 
-    # --- 2. Обробка SL_new.csv та перенесення ---
+    # --- 2. Обробка 1.csv та перенесення ---
     
     # Мапа відповідності: SL_old_idx (вихідний файл) -> SL_new_idx (вхідний файл)
     MAPPING_INDICES = {
@@ -1013,7 +1014,7 @@ def separate_existing_products():
                     new_row[0] = item_id 
                     new_row[1] = item_sku
                     
-                    # 2. Решта колонок з SL_new.csv
+                    # 2. Решта колонок з 1.csv
                     for sl_old_idx, sl_new_idx in MAPPING_INDICES.items():
                          new_row[sl_old_idx] = row[sl_new_idx]
                     
@@ -1040,7 +1041,7 @@ def separate_existing_products():
             writer.writerows(items_to_keep)
         
         os.replace(sl_new_temp_path, sl_new_path)
-        logging.info(f"SL_new.csv оновлено. Залишилося {len(items_to_keep) - 1} нових товарів для імпорту.")
+        logging.info(f"1.csv оновлено. Залишилося {len(items_to_keep) - 1} нових товарів для імпорту.")
 
     except Exception as e:
         logging.error(f"Виникла непередбачена помилка під час звірки та перенесення: {e}")
@@ -1050,10 +1051,10 @@ def separate_existing_products():
 def assign_new_sku_to_products():
     """
     Знаходить максимальний SKU у zalishki.csv і присвоює послідовні SKU 
-    товарам без SKU у колонці P(15) файлу SL_new.csv.
+    товарам без SKU у колонці P(15) файлу 1.csv.
     """
     log_message_to_existing_file()
-    logging.info("Починаю процес присвоєння нових SKU товарам у SL_new.csv...")
+    logging.info("Починаю процес присвоєння нових SKU товарам у 1.csv...")
 
     settings = load_settings()
     try:
@@ -1072,7 +1073,7 @@ def assign_new_sku_to_products():
     next_sku = starting_sku + 1
     sku_assigned_count = 0
     
-    # 2. Обробка SL_new.csv
+    # 2. Обробка 1.csv
     sl_new_temp_path = sl_new_path + '.temp'
 
     try:
@@ -1111,11 +1112,228 @@ def assign_new_sku_to_products():
             os.replace(sl_new_temp_path, sl_new_path)
             logging.info(f"Успішно присвоєно {sku_assigned_count} нових SKU. Наступний SKU буде {next_sku}.")
         else:
-            logging.info("Усі товари в SL_new.csv вже мають SKU. Змін не внесено.")
+            logging.info("Усі товари в 1.csv вже мають SKU. Змін не внесено.")
 
     except FileNotFoundError:
-        logging.error(f"Файл SL_new.csv не знайдено за шляхом: {sl_new_path}")
+        logging.error(f"Файл 1.csv не знайдено за шляхом: {sl_new_path}")
     except Exception as e:
         logging.error(f"Виникла непередбачена помилка під час присвоєння SKU: {e}")
         if os.path.exists(sl_new_temp_path):
             os.remove(sl_new_temp_path)
+
+def download_images_for_product():
+    """
+    Комплексний процес: 
+    1. ОЧИЩЕННЯ папок JPG та WEBP.
+    2. Обробляє 1.csv, скачує зображення товарів у підпапки за категоріями (JPG-папка).
+    3. Оновлює 1.csv (колонка R/17) іменами файлів.
+    4. Переміщує всі .gif файли до WEBP-папки.
+    """
+    # --- КОНСТАНТИ ІНДЕКСІВ 1.csv ---
+    URL_INDEX = 1        # B (URL товару)
+    SKU_INDEX = 15       # P (SKU для імені файлу)
+    CATEGORY_INDEX = 16  # Q (Категорія для папки)
+    IMAGES_LIST_INDEX = 17 # R (Сюди записуємо імена файлів)
+
+
+
+    # -----------------------------------------------------------
+    # --- ВНУТРІШНЯ ДОПОМІЖНА ФУНКЦІЯ: ОЧИЩЕННЯ ПАПКИ ---
+    # -----------------------------------------------------------
+    def _clear_directory_contents(folder_path: str):
+        """Безпечно видаляє весь вміст (файли та папки) всередині заданої директорії."""
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path, exist_ok=True)
+            return
+
+        logging.info(f"Очищення директорії: {folder_path}...")
+        for item in os.listdir(folder_path):
+            item_path = os.path.join(folder_path, item)
+            try:
+                if os.path.isfile(item_path) or os.path.islink(item_path):
+                    os.unlink(item_path)
+                elif os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+            except Exception as e:
+                logging.error(f'Не вдалося видалити {item_path}. Причина: {e}')
+        logging.info("Очищення завершено.")
+
+    # -----------------------------------------------------------
+    # --- ВНУТРІШНЯ ДОПОМІЖНА ФУНКЦІЯ: ЛОГІКА ПЕРЕМІЩЕННЯ GIF ---
+    # -----------------------------------------------------------
+    def _move_gif_files(base_jpg_path: str, webp_dest_path: str):
+        """Шукає GIF-файли у підпапках base_jpg_path і переміщує їх до webp_dest_path."""
+        if not os.path.exists(webp_dest_path):
+            os.makedirs(webp_dest_path, exist_ok=True)
+            
+        logging.info(f"Крок 3/3: Починаю переміщення GIF-файлів...")
+        moved_count = 0
+        
+        try:
+            for root, _, files in os.walk(base_jpg_path):
+                if root == base_jpg_path:
+                    continue 
+                    
+                for file in files:
+                    if file.lower().endswith('.gif'):
+                        source_path = os.path.join(root, file)
+                        relative_path = os.path.relpath(source_path, base_jpg_path)
+                        dest_path = os.path.join(webp_dest_path, relative_path)
+                        
+                        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                        shutil.move(source_path, dest_path)
+                        moved_count += 1
+                        logging.debug(f"Переміщено GIF: {relative_path}")
+                        
+            logging.info(f"Переміщення GIF-файлів завершено. Переміщено {moved_count} файлів.")
+        except Exception as e:
+            logging.error(f"Помилка під час переміщення GIF-файлів: {e}")
+
+    # -----------------------------------------------------------
+    # --- ВНУТРІШНЯ ДОПОМІЖНА ФУНКЦІЯ: ЗАВАНТАЖЕННЯ ОДНОГО ТОВАРУ ---
+    # -----------------------------------------------------------
+    def _download_single_product_images(
+        url: str, 
+        base_jpg_folder: str, 
+        category_name: str, 
+        product_sku: str, 
+        categories_map: Dict[str, str]
+    ) -> Optional[List[str]]:
+        """Парсить, завантажує зображення та зберігає їх у папку категорії (в base_jpg_folder)."""
+        
+        folder_slug = categories_map.get(category_name.strip())
+        if not folder_slug:
+            folder_slug = category_name.strip().lower().replace(' ', '_').replace(',', '')
+        
+        target_path = os.path.join(base_jpg_folder, folder_slug)
+        os.makedirs(target_path, exist_ok=True)
+        
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+        except requests.RequestException as e:
+            logging.error(f"Помилка запиту URL {url} для SKU {product_sku}: {e}")
+            return None
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+        images = soup.find_all('a', class_='thumb_image_container')
+        
+        image_urls = {img.get('href') for img in images if img.get('href')}
+        filenames = []
+        
+        for idx, img_url in enumerate(image_urls, start=1):
+            try:
+                img_response = requests.get(img_url, timeout=10)
+                img_response.raise_for_status()
+                
+                mime_type = img_response.headers.get('Content-Type')
+                
+                if mime_type == 'image/webp':
+                    ext = '.webp'
+                elif mime_type == 'image/png':
+                    ext = '.png'
+                elif mime_type == 'image/gif':
+                    ext = '.gif'
+                else:
+                    ext = mimetypes.guess_extension(mime_type) or '.jpg' 
+                
+                file_name = f"{product_sku}-{idx}{ext}"
+                file_path = os.path.join(target_path, file_name)
+                
+                with open(file_path, 'wb') as f:
+                    f.write(img_response.content)
+                
+                filenames.append(file_name)
+                
+            except requests.RequestException as e:
+                logging.warning(f"Не вдалося завантажити зображення {img_url} для SKU {product_sku}: {e}")
+            except Exception as e:
+                logging.error(f"Непередбачена помилка при збереженні зображення {img_url}: {e}")
+                
+        return filenames
+    
+    # -----------------------------------------------------------
+    # --- ГОЛОВНИЙ ПОЧАТОК ФУНКЦІЇ ---
+    # -----------------------------------------------------------
+
+    log_message_to_existing_file()
+    logging.info("Починаю комплексний процес завантаження, сортування та очищення зображень...")
+
+    settings = load_settings()
+    try:
+        sl_new_path = settings['paths']['csv_path_supliers_1_new']
+        base_jpg_path = settings['paths']['img_path_jpg'] 
+        webp_dest_path = settings['paths']['img_path_webp'] 
+        categories_map = settings['categories']
+        
+    except KeyError as e:
+        logging.error(f"Помилка конфігурації. Не знайдено необхідний шлях/категорію в settings: {e}")
+        return
+    
+    # 1. КРОК ОЧИЩЕННЯ ПАПОК
+    _clear_directory_contents(base_jpg_path)
+    _clear_directory_contents(webp_dest_path)
+
+    MIN_ROW_LEN = IMAGES_LIST_INDEX + 1
+    temp_file_path = sl_new_path + '.temp_img'
+    rows_to_keep = []
+    total_download_count = 0
+    
+    # 2. ЦИКЛ ЗАВАНТАЖЕННЯ ЗОБРАЖЕНЬ ТА ОНОВЛЕННЯ CSV
+    try:
+        with open(sl_new_path, mode='r', encoding='utf-8') as input_file:
+            reader = csv.reader(input_file)
+            header = next(reader)
+            
+            if len(header) < MIN_ROW_LEN:
+                header.extend([''] * (MIN_ROW_LEN - len(header)))
+            rows_to_keep.append(header)
+            
+            logging.info("Крок 2/3: Починаю завантаження зображень...")
+            for idx, row in enumerate(reader, start=1):
+                
+                if len(row) < MIN_ROW_LEN:
+                    row.extend([''] * (MIN_ROW_LEN - len(row)))
+                
+                url = row[URL_INDEX].strip()
+                sku = row[SKU_INDEX].strip()
+                category = row[CATEGORY_INDEX].strip()
+
+                if not (url and sku and category):
+                    logging.warning(f"Рядок {idx}: Пропущено завантаження - відсутній URL, SKU({sku}) або Категорія({category}).")
+                    rows_to_keep.append(row)
+                    continue
+
+                filenames = _download_single_product_images(url, base_jpg_path, category, sku, categories_map)
+                
+                if filenames is not None:
+                    row[IMAGES_LIST_INDEX] = ', '.join(filenames)
+                    total_download_count += len(filenames)
+                else:
+                    row[IMAGES_LIST_INDEX] = 'Помилка завантаження'
+
+                rows_to_keep.append(row)
+                
+                time.sleep(random.uniform(0.5, 2)) 
+
+        # 3. Запис оновленого CSV
+        with open(temp_file_path, mode='w', encoding='utf-8', newline='') as output_file:
+            writer = csv.writer(output_file)
+            writer.writerows(rows_to_keep)
+        
+        os.replace(temp_file_path, sl_new_path)
+        logging.info(f"Крок 2/3 (Завантаження) завершено. Завантажено {total_download_count} зображень. Файл 1.csv оновлено.")
+
+    except Exception as e:
+        logging.error(f"Критична помилка під час обробки CSV/завантаження: {e}", exc_info=True)
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+        return
+
+    # 4. КРОК ПЕРЕМІЩЕННЯ GIF-ФАЙЛІВ
+    _move_gif_files(base_jpg_path, webp_dest_path)
+    
+    logging.info("Весь процес обробки зображень успішно виконано.")
+
+
+
