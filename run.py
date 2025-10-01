@@ -4,7 +4,7 @@ from scr.products import export_products, download_supplier_price_list, process_
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
 from scr.suppliers_1 import find_new_products, find_product_data, parse_product_attributes, apply_final_standardization, \
-                        fill_product_category, refill_product_category, separate_existing_products
+                        fill_product_category, refill_product_category, separate_existing_products, assign_new_sku_to_products
 
 
 def main():
@@ -126,6 +126,13 @@ def main():
     help="Звірити SL_new.csv з базою (zalishki.csv) за штрихкодом, перенести існуючі товари у SL_old_prod_new_SHK.csv та видалити їх з SL_new.csv."
     )
 
+    # ✨ НОВИЙ АРГУМЕНТ для присвоєння нових SKU
+    parser.add_argument(
+    "--assign-sku",
+    action="store_true",
+    help="Знайти найбільший SKU у zalishki.csv та присвоїти послідовні SKU новим товарам у SL_new.csv (колонка P/15)."
+    )
+
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -200,6 +207,12 @@ def main():
     elif args.separate_existing: # <--- ДОДАНО
         print("🔍 Запускаю звірку штрихкодів з базою та перенесення існуючих товарів...")
         separate_existing_products()
+
+    # ✨ Додаємо новий elif блок для присвоєння SKU
+    elif args.assign_sku:
+        print("🔢 Запускаю присвоєння нових SKU...")
+        assign_new_sku_to_products()
+
 
     else:
         # Якщо аргументи не вказано, вивести довідку

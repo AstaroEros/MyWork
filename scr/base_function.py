@@ -432,3 +432,38 @@ def load_poznachky_csv():
     except Exception as e:
         logging.error(f"Виникла помилка при завантаженні poznachky.csv: {e}")
         return []
+
+def find_max_sku(zalishki_path: str) -> int:
+    """
+    Знаходить найбільше числове значення SKU в колонці B(1) файлу zalishki.csv.
+    """
+    SKU_ZALISHKI_INDEX = 1 # Колонка B
+    max_sku = 0
+    logging.info(f"Починаю пошук максимального SKU у файлі: {zalishki_path}")
+
+    try:
+        with open(zalishki_path, mode='r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            next(reader) # Пропускаємо заголовок
+            
+            for row in reader:
+                if len(row) > SKU_ZALISHKI_INDEX:
+                    sku_str = row[SKU_ZALISHKI_INDEX].strip()
+                    try:
+                        # Припускаємо, що SKU є цілими числами (int)
+                        sku_int = int(sku_str)
+                        if sku_int > max_sku:
+                            max_sku = sku_int
+                    except ValueError:
+                        # Ігноруємо нечислові або порожні значення SKU
+                        pass
+        
+        logging.info(f"Знайдено максимальний SKU у базі: {max_sku}")
+        return max_sku
+    
+    except FileNotFoundError:
+        logging.error(f"Файл бази zalishki.csv не знайдено за шляхом: {zalishki_path}")
+        return 0
+    except Exception as e:
+        logging.error(f"Помилка при читанні zalishki.csv для пошуку SKU: {e}")
+        return 0

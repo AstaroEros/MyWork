@@ -10,7 +10,7 @@ import random
 import logging
 from typing import Dict, Tuple, List, Optional
 from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log_message_to_existing_file, load_attributes_csv, \
-                                save_attributes_csv, load_category_csv, save_category_csv, load_poznachky_csv
+                                save_attributes_csv, load_category_csv, save_category_csv, load_poznachky_csv, find_max_sku
 from datetime import datetime, timedelta
 
 
@@ -775,7 +775,7 @@ def refill_product_category():
 
     settings = load_settings()
     try:
-# ... (блок ініціалізації індексів та змінних без змін) ...
+    # ... (блок ініціалізації індексів та змінних) ...
         supliers_new_path = settings['paths']['csv_path_supliers_1_new'] 
         FIXED_SUPPLIER_ID = 1 
         
@@ -884,10 +884,6 @@ def refill_product_category():
         logging.error(f"Виникла непередбачена помилка під час повторного заповнення: {e}")
         if 'supliers_new_path' in locals() and os.path.exists(temp_file_path): 
             os.remove(temp_file_path)
-
-
-
-
 
 def separate_existing_products():
     """
@@ -1051,4 +1047,75 @@ def separate_existing_products():
         if os.path.exists(sl_new_temp_path):
             os.remove(sl_new_temp_path)
 
+def assign_new_sku_to_products():
+    """
+    Знаходить максимальний SKU у zalishki.csv і присвоює послідовні SKU 
+    товарам без SKU у колонці P(15) файлу SL_new.csv.
+    """
+    log_message_to_existing_file()
+    logging.info("Починаю процес присвоєння нових SKU товарам у SL_new.csv...")
 
+    settings = load_settings()
+    try:
+        sl_new_path = settings['paths']['csv_path_supliers_1_new']
+        zalishki_path = settings['paths']['csv_path_zalishki']
+    except KeyError as e:
+        logging.error(f"Помилка конфігурації. Не знайдено шлях: {e}")
+        return
+    NEW_SKU_SL_NEW_INDEX = 15 
+    # 1. Знаходимо найбільший SKU у базі
+    starting_sku = find_max_sku(zalishki_path)
+    if starting_sku == 0:
+        logging.warning("Не вдалося знайти максимальний SKU у базі або база порожня. Присвоєння SKU неможливе.")
+        return
+
+    next_sku = starting_sku + 1
+    sku_assigned_count = 0
+    
+    # 2. Обробка SL_new.csv
+    sl_new_temp_path = sl_new_path + '.temp'
+
+    try:
+        with open(sl_new_path, mode='r', encoding='utf-8', newline='') as input_file:
+            reader = csv.reader(input_file)
+            header = next(reader)
+            
+            # Визначаємо мінімальну довжину рядка, яка нам потрібна
+            min_row_len = NEW_SKU_SL_NEW_INDEX + 1
+
+            rows_to_write = [header]
+            
+            for row in reader:
+                # Розширюємо рядок, якщо він занадто короткий, щоб не отримати IndexError
+                if len(row) < min_row_len:
+                    row.extend([''] * (min_row_len - len(row)))
+                
+                # Перевіряємо, чи є вже SKU в колонці P(15)
+                current_sku = row[NEW_SKU_SL_NEW_INDEX].strip()
+
+                # Ми присвоюємо новий SKU, якщо комірка P(15) порожня
+                if not current_sku:
+                    # Присвоюємо новий послідовний SKU
+                    row[NEW_SKU_SL_NEW_INDEX] = str(next_sku)
+                    next_sku += 1
+                    sku_assigned_count += 1
+                
+                rows_to_write.append(row)
+
+        # 3. Запис оновлених даних
+        if sku_assigned_count > 0:
+            with open(sl_new_temp_path, mode='w', encoding='utf-8', newline='') as output_file:
+                writer = csv.writer(output_file)
+                writer.writerows(rows_to_write)
+            
+            os.replace(sl_new_temp_path, sl_new_path)
+            logging.info(f"Успішно присвоєно {sku_assigned_count} нових SKU. Наступний SKU буде {next_sku}.")
+        else:
+            logging.info("Усі товари в SL_new.csv вже мають SKU. Змін не внесено.")
+
+    except FileNotFoundError:
+        logging.error(f"Файл SL_new.csv не знайдено за шляхом: {sl_new_path}")
+    except Exception as e:
+        logging.error(f"Виникла непередбачена помилка під час присвоєння SKU: {e}")
+        if os.path.exists(sl_new_temp_path):
+            os.remove(sl_new_temp_path)
