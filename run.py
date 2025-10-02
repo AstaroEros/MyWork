@@ -5,7 +5,8 @@ from scr.products import export_products, download_supplier_price_list, process_
                         prepare_for_website_upload, update_products
 from scr.suppliers_1 import find_new_products, find_product_data, parse_product_attributes, apply_final_standardization, \
                         fill_product_category, refill_product_category, separate_existing_products, assign_new_sku_to_products, \
-                        download_images_for_product, create_new_products_import_file, update_existing_products_batch
+                        download_images_for_product, create_new_products_import_file, update_existing_products_batch, \
+                        create_new_products_batch
 
 
 def main():
@@ -156,6 +157,11 @@ def main():
     help='Завантажити дані з SL_old_prod_new_SHK.csv і оновити існуючі товари у базі.'
     )
     
+    # --- НОВА КОМАНДА ДЛЯ СТВОРЕННЯ НОВИХ ТОВАРІВ ---
+    parser.add_argument('--create-new-products', 
+        action='store_true', 
+        help='Завантажити дані з SL_new_prod.csv і створити нові товари у базі.'
+    )
 
     # 3. Парсинг аргументів
     args = parser.parse_args()
@@ -249,9 +255,14 @@ def main():
         create_new_products_import_file()
 
     # --- НОВИЙ ВИКЛИК ---
-    if args.update_old_products:
+    elif args.update_old_products:
         print("⬆️ Починаю пакетне оновлення існуючих товарів...")
         update_existing_products_batch()
+
+
+    elif args.create_new_products:
+        print("✨ Починаю пакетне створення нових товарів...")
+        create_new_products_batch()
 
     else:
         # Якщо аргументи не вказано, вивести довідку

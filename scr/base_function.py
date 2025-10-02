@@ -468,7 +468,6 @@ def find_max_sku(zalishki_path: str) -> int:
     except Exception as e:
         logging.error(f"Помилка при читанні zalishki.csv для пошуку SKU: {e}")
         return 0
-    
 
 def _process_batch_update(wcapi: Any, batch_data: List[Dict[str, Any]], errors_list: List[str]) -> int:
     """Виконує пакетний запит 'update' до WooCommerce API."""
@@ -496,6 +495,81 @@ def _process_batch_update(wcapi: Any, batch_data: List[Dict[str, Any]], errors_l
             return updated_count
         else:
             err_msg = f"❌ Критична помилка API ({response.status_code}) при пакетному оновленні. Помилка: {response.text[:200]}..."
+            errors_list.append(err_msg)
+            logging.critical(err_msg)
+            return 0
+            
+    except Exception as e:
+        err_msg = f"❌ Непередбачена помилка під час відправки пакету: {e}"
+        errors_list.append(err_msg)
+        logging.critical(err_msg, exc_info=True)
+        return 0
+    
+
+# --- ДОПОМІЖНА ФУНКЦІЯ ДЛЯ ПОШУКУ ID ЗОБРАЖЕННЯ (без змін) ---
+def _get_media_id_by_filename(wcapi: Any, filename: str) -> Optional[int]:
+    """Шукає ID медіафайлу за його іменем (title) або slug."""
+    
+    file_slug = os.path.splitext(filename)[0]
+    
+    # 1. Пошук за slug
+    try:
+        response = wcapi.get("media", params={'search': file_slug, 'per_page': 1, 'orderby': 'slug', 'order': 'asc'})
+        
+        if response.status_code == 200:
+            media_items = response.json()
+            if media_items:
+                item = media_items[0]
+                if item.get('slug') == file_slug or item.get('title', {}).get('rendered') == filename:
+                     return item['id']
+            
+    except Exception as e:
+        logging.error(f"Помилка при пошуку медіа ID для {filename}: {e}")
+        return None
+
+    # 2. Якщо перший пошук не вдався, спробуємо пошук за точним іменем файлу (Title)
+    try:
+        response = wcapi.get("media", params={'search': filename, 'per_page': 1, 'orderby': 'title', 'order': 'asc'})
+        
+        if response.status_code == 200:
+            media_items = response.json()
+            if media_items:
+                item = media_items[0]
+                if item.get('title', {}).get('rendered') == filename:
+                     return item['id']
+            
+    except Exception as e:
+        logging.error(f"Помилка при пошуку медіа ID для {filename}: {e}")
+        return None
+        
+    logging.warning(f"❌ Медіа ID для файлу '{filename}' не знайдено.")
+    return None
+
+# --- ДОПОМІЖНА ФУНКЦІЯ ДЛЯ ПАКЕТНОГО ЗАПИСУ (Створення) (без змін) ---
+def _process_batch_create(wcapi: Any, batch_data: List[Dict[str, Any]], errors_list: List[str]) -> int:
+    """Виконує пакетний запит 'create' до WooCommerce API."""
+    
+    payload = {"create": batch_data}
+    
+    try:
+        logging.info(f"Надсилаю пакет на створення ({len(batch_data)} товарів)...")
+        response = wcapi.post("products/batch", data=payload) 
+        
+        if response.status_code == 200:
+            result = response.json()
+            created_count = len(result.get('create', []))
+            
+            api_errors = result.get('errors', [])
+            if api_errors:
+                for err in api_errors:
+                    err_msg = f"API-Помилка при створенні: SKU '{err.get('data', {}).get('resource_id', 'N/A')}', Code: {err.get('code', 'N/A')}: {err.get('message', 'Невідома помилка')}"
+                    errors_list.append(err_msg)
+                    logging.error(err_msg)
+                
+            logging.info(f"✅ Пакет створено. Успішно оброблено API: {created_count} товарів. Помилок у пакеті: {len(api_errors)}")
+            return created_count
+        else:
+            err_msg = f"❌ Критична помилка API ({response.status_code}) при пакетному створенні. Помилка: {response.text[:200]}..."
             errors_list.append(err_msg)
             logging.critical(err_msg)
             return 0

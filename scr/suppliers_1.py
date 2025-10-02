@@ -13,7 +13,7 @@ import logging
 from typing import Dict, Tuple, List, Optional, Any
 from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log_message_to_existing_file, load_attributes_csv, \
                                 save_attributes_csv, load_category_csv, save_category_csv, load_poznachky_csv, find_max_sku, \
-                                _process_batch_update
+                                _process_batch_update, _get_media_id_by_filename, _process_batch_create
 from datetime import datetime, timedelta
 
 
@@ -1759,3 +1759,184 @@ def update_existing_products_batch():
             logging.warning(f"-> {error}")
     else:
         logging.info("✅ Оновлення завершено без помилок API/пропусків.")
+
+def create_new_products_batch():
+    """
+    Завантажує дані з SL_new_prod.csv та виконує пакетне СТВОРЕННЯ 
+    нових товарів у WooCommerce через REST API.
+    """
+    log_message_to_existing_file()
+    logging.info("🚀 Починаю пакетне СТВОРЕННЯ нових товарів з SL_new_prod.csv...")
+
+    settings = load_settings()
+    if not settings:
+        logging.critical("❌ Не вдалося завантажити налаштування.")
+        return
+
+    try:
+        csv_path = settings['paths']['csv_path_sl_new_prod']
+    except KeyError as e:
+        logging.error(f"❌ Помилка конфігурації. Не знайдено шлях до CSV: {e}")
+        return
+
+    wcapi = get_wc_api(settings)
+    if not wcapi:
+        logging.critical("❌ Не вдалося створити об'єкт WooCommerce API.")
+        return
+    
+    BATCH_SIZE = 50 
+    products_to_create: List[Dict[str, Any]] = []
+    total_products_read = 0
+    total_created = 0
+    total_skipped = 0
+    errors_list: List[str] = []
+    
+    start_time = time.time()
+    
+    logging.info("Покладаємося на API для перевірки дублікатів SKU під час створення...")
+
+    # --- Константи ---
+    STANDARD_FIELDS = ['sku', 'post_date', 'excerpt', 'content', 'product_type']
+    ACF_PREFIX = 'Мета: '
+    ATTRIBUTE_PREFIX = 'attribute:'
+    # ------------------
+
+    try:
+        with open(csv_path, mode='r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            headers = next(reader)
+            field_map: Dict[str, int] = {header: index for index, header in enumerate(headers)}
+            
+            for row in reader:
+                total_products_read += 1
+                
+                sku = row[field_map.get('sku', -1)].strip()
+                name = row[field_map.get('name', -1)].strip()
+                if not sku or not name:
+                    errors_list.append(f"Рядок {total_products_read}: Пропущено. Відсутній SKU або Name.")
+                    total_skipped += 1
+                    continue
+                
+                product_data: Dict[str, Any] = {"sku": sku, "name": name, "status": "publish"}
+                meta_data: List[Dict[str, Any]] = []
+                attributes: List[Dict[str, Any]] = []
+                images: List[Dict[str, Any]] = []
+
+                # --- Формування полів ---
+                for key, index in field_map.items():
+                    if index >= len(row): continue
+                    value = row[index].strip()
+                    
+                    if key == 'sku' or key == 'name':
+                        continue
+                    elif key == 'product_type':
+                         product_data['type'] = value or 'simple'
+                    elif key == 'status':
+                         product_data['status'] = value or 'publish'
+                    elif key == 'manage_stock':
+                        product_data[key] = (value.lower() in ['yes', 'true', '1'])
+                    elif key == 'regular_price':
+                        product_data[key] = value
+                    elif key.startswith(ACF_PREFIX):
+                        acf_key = key.replace(ACF_PREFIX, '')
+                        meta_data.append({"key": acf_key, "value": value})
+                    elif key == 'rank_math_focus_keyword':
+                        meta_data.append({"key": key, "value": value})
+                    
+                    # --- АТРИБУТИ ---
+                    elif key.startswith(ATTRIBUTE_PREFIX):
+                        attribute_name = key.replace(ATTRIBUTE_PREFIX, '')  # 'pa_made-in'
+                        if value:
+                            # Розділяємо значення атрибутів комою (це стандартна практика)
+                            options_list = [v.strip() for v in value.split(',') if v.strip()] 
+                            if options_list:
+                                attributes.append({
+                                    "name": attribute_name, 
+                                    "position": len(attributes),
+                                    "visible": True,
+                                    "variation": False,
+                                    "options": options_list,
+                                })
+
+                    # --- КАТЕГОРІЇ (ВИПРАВЛЕНО: ВИКОРИСТАННЯ '|') ---
+                    elif key == 'categories':
+                        if value:
+                            # ! ВИКОРИСТАННЯ '|' ДЛЯ НАДІЙНОГО РОЗДІЛЕННЯ КАТЕГОРІЙ
+                            category_names = [c.strip() for c in value.split('|') if c.strip()]
+                            # API очікує об'єкти з 'name' або 'id'
+                            product_data['categories'] = [{"name": name} for name in category_names]
+                            
+                    elif key == 'Позначки':
+                         if value:
+                            tag_names = [t.strip() for t in value.split(',') if t.strip()]
+                            product_data['tags'] = [{"name": name} for name in tag_names]
+                    
+                    # --- ЗОБРАЖЕННЯ ---
+                    elif key == 'image_name':
+                        if value:
+                            image_files = [f.strip() for f in value.split(',') if f.strip()]
+                            
+                            for filename in image_files:
+                                media_id = _get_media_id_by_filename(wcapi, filename)
+                                
+                                if media_id:
+                                    images.append({"id": media_id})
+                                else:
+                                    errors_list.append(f"⚠️ SKU {sku}: Зображення '{filename}' не знайдено в медіатеці.")
+                            
+                            if images:
+                                product_data['images'] = images
+
+                    # --- ІНШІ СТАНДАРТНІ ПОЛЯ ---
+                    elif key == 'content':
+                        product_data['description'] = value
+                    elif key == 'excerpt':
+                        product_data['short_description'] = value
+                    elif key == 'post_date':
+                        if value:
+                            try:
+                                # Встановлюємо дату створення
+                                product_data['date_created'] = value
+                            except Exception:
+                                errors_list.append(f"⚠️ SKU {sku}: Некоректний формат post_date.")
+                    else:
+                        product_data[key] = value
+
+                # Додаємо сформовані списки до основного тіла
+                if meta_data:
+                    product_data['meta_data'] = meta_data 
+                if attributes:
+                    product_data['attributes'] = attributes
+                
+                products_to_create.append(product_data)
+
+                if len(products_to_create) >= BATCH_SIZE:
+                    total_created += _process_batch_create(wcapi, products_to_create, errors_list)
+                    products_to_create = [] 
+            
+            if products_to_create:
+                total_created += _process_batch_create(wcapi, products_to_create, errors_list)
+            
+    except FileNotFoundError:
+        logging.critical(f"❌ Файл {csv_path} не знайдено.")
+        return
+    except Exception as e:
+        logging.critical(f"❌ Критична помилка під час читання/обробки CSV: {e}", exc_info=True)
+        return
+
+    # 3. Підсумок
+    end_time = time.time()
+    elapsed_time = int(end_time - start_time)
+    
+    logging.info("--- 🏁 Підсумок створення нових товарів ---")
+    logging.info(f"Всього прочитано рядків: {total_products_read}")
+    logging.info(f"Успішно СТВОРЕНО товарів: {total_created}")
+    logging.info(f"Пропущено/з помилками: {total_products_read - total_created}")
+    logging.info(f"Загальна тривалість: {elapsed_time} сек.")
+    
+    if errors_list:
+        logging.warning(f"⚠️ Знайдено {len(errors_list)} помилок/пропусків. Перші 5 помилок:")
+        for error in errors_list[:5]:
+            logging.warning(f"-> {error}")
+    else:
+        logging.info("✅ Створення нових товарів завершено успішно.")
