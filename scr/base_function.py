@@ -5,6 +5,7 @@ import json
 import csv
 import logging
 from datetime import datetime
+from typing import Dict, Tuple, List, Optional, Any
 
 
 def load_settings():
@@ -466,4 +467,41 @@ def find_max_sku(zalishki_path: str) -> int:
         return 0
     except Exception as e:
         logging.error(f"Помилка при читанні zalishki.csv для пошуку SKU: {e}")
+        return 0
+    
+
+def _process_batch_update(wcapi: Any, batch_data: List[Dict[str, Any]], errors_list: List[str]) -> int:
+    """Виконує пакетний запит 'update' до WooCommerce API."""
+    
+    payload = {"update": batch_data}
+    
+    try:
+        logging.info(f"Надсилаю пакет на оновлення ({len(batch_data)} товарів)...")
+        
+        response = wcapi.post("products/batch", data=payload) 
+        
+        if response.status_code == 200:
+            result = response.json()
+            updated_count = len(result.get('update', []))
+            
+            # Детальне логування помилок, які повернув API
+            api_errors = result.get('errors', [])
+            if api_errors:
+                for err in api_errors:
+                    err_msg = f"API-Помилка (ID: {err.get('id', 'N/A')}): {err.get('message', 'Невідома помилка')}"
+                    errors_list.append(err_msg)
+                    logging.error(err_msg)
+                
+            logging.info(f"✅ Пакет оновлено. Успішно оброблено API: {updated_count} товарів. Помилок у пакеті: {len(api_errors)}")
+            return updated_count
+        else:
+            err_msg = f"❌ Критична помилка API ({response.status_code}) при пакетному оновленні. Помилка: {response.text[:200]}..."
+            errors_list.append(err_msg)
+            logging.critical(err_msg)
+            return 0
+            
+    except Exception as e:
+        err_msg = f"❌ Непередбачена помилка під час відправки пакету: {e}"
+        errors_list.append(err_msg)
+        logging.critical(err_msg, exc_info=True)
         return 0

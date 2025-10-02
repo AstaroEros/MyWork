@@ -5,7 +5,7 @@ from scr.products import export_products, download_supplier_price_list, process_
                         prepare_for_website_upload, update_products
 from scr.suppliers_1 import find_new_products, find_product_data, parse_product_attributes, apply_final_standardization, \
                         fill_product_category, refill_product_category, separate_existing_products, assign_new_sku_to_products, \
-                        download_images_for_product, create_new_products_import_file
+                        download_images_for_product, create_new_products_import_file, update_existing_products_batch
 
 
 def main():
@@ -150,6 +150,13 @@ def main():
     )
 
 
+    # --- НОВА КОМАНДА ДЛЯ ОНОВЛЕННЯ ІСНУЮЧИХ ТОВАРІВ ---
+    parser.add_argument('--update-old-products', 
+    action='store_true', 
+    help='Завантажити дані з SL_old_prod_new_SHK.csv і оновити існуючі товари у базі.'
+    )
+    
+
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -241,6 +248,10 @@ def main():
         print("📋 Запускаю створення файлу SL_new_prod.csv...")
         create_new_products_import_file()
 
+    # --- НОВИЙ ВИКЛИК ---
+    if args.update_old_products:
+        print("⬆️ Починаю пакетне оновлення існуючих товарів...")
+        update_existing_products_batch()
 
     else:
         # Якщо аргументи не вказано, вивести довідку

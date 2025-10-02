@@ -10,9 +10,10 @@ from bs4 import BeautifulSoup
 import random 
 from PIL import Image
 import logging
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional, Any
 from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log_message_to_existing_file, load_attributes_csv, \
-                                save_attributes_csv, load_category_csv, save_category_csv, load_poznachky_csv, find_max_sku
+                                save_attributes_csv, load_category_csv, save_category_csv, load_poznachky_csv, find_max_sku, \
+                                _process_batch_update
 from datetime import datetime, timedelta
 
 
@@ -891,6 +892,7 @@ def separate_existing_products():
     """
     Звіряє штрихкоди (C/2) 1.csv з базою (zalishki.csv),
     переносить знайдені товари у SL_old_prod_new_SHK.csv та видаляє їх з 1.csv.
+    --- ВИПРАВЛЕНО: Видалено перенесення колонки 'status' ---
     """
     log_message_to_existing_file()
     logging.info("Починаю звірку 1.csv зі штрихкодами бази (zalishki.csv)...")
@@ -905,17 +907,19 @@ def separate_existing_products():
         return
         
     # --- КРИТИЧНО НЕОБХІДНІ ЛОКАЛЬНІ ІНДЕКСИ ---
-    SHK_SL_NEW_INDEX = 2        # C (Штрихкод SL_new для звірки)
-    SHK_ZALISHKI_INDEX = 7      # H (Штрихкод у базі zalishki.csv)
-    ID_ZALISHKI_INDEX = 0       # A (ID у базі)
-    SKU_ZALISHKI_INDEX = 1      # B (SKU у базі)
+    SHK_SL_NEW_INDEX = 2      # C (Штрихкод SL_new для звірки)
+    SHK_ZALISHKI_INDEX = 7    # H (Штрихкод у базі zalishki.csv)
+    ID_ZALISHKI_INDEX = 0     # A (ID у базі)
+    SKU_ZALISHKI_INDEX = 1    # B (SKU у базі)
     DESCRIPTION_SL_NEW_INDEX = 7# H (Описание, мапиться до content)
-    OLD_SKU_SL_NEW_INDEX = 5    # E (old_sku, мапиться до artykul_lutsk)
+    OLD_SKU_SL_NEW_INDEX = 5  # E (old_sku, мапиться до artykul_lutsk)
 
     # --- 0. Очищення SL_old_prod_new_SHK.csv (залишаємо лише заголовок) ---
     sl_old_header_base = [
         'id', 'sku', 'Мета: url_lutsk', 'Мета: shtrih_cod', 'Мета: artykul_lutsk', 'Позначки', 
-        'rank_math_focus_keyword', 'Мета: postachalnyk', 'status', 'manage_stock', 
+        'rank_math_focus_keyword', 'Мета: postachalnyk', 
+        #'status', # <-- ВИДАЛЕНО З ЗАГОЛОВКА
+        'manage_stock', 
         'tax_status', 'excerpt', 'attribute:pa_based', 'attribute:pa_color', 
         'attribute:pa_diameter', 'attribute:pa_efekt', 'attribute:pa_for-whom', 
         'attribute:pa_height', 'attribute:pa_length', 'attribute:pa_line-brand', 
@@ -932,7 +936,7 @@ def separate_existing_products():
         with open(sl_old_prod_shk_path, mode='w', encoding='utf-8', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(sl_old_header)
-        logging.info("Файл SL_old_prod_new_SHK.csv очищено (залишено лише заголовок, оновлено структуру).")
+        logging.info("Файл SL_old_prod_new_SHK.csv очищено (залишено лише заголовок, оновлено структуру без 'status').")
     except Exception as e:
         logging.error(f"Помилка при очищенні SL_old_prod_new_SHK.csv: {e}")
         return
@@ -961,28 +965,37 @@ def separate_existing_products():
     # --- 2. Обробка 1.csv та перенесення ---
     
     # Мапа відповідності: SL_old_idx (вихідний файл) -> SL_new_idx (вхідний файл)
+    # Зверніть увагу: Колонка 'status' (SL_old index 8) ВИДАЛЕНА.
+    # Всі наступні індекси в SL_old зсунуті на 1.
     MAPPING_INDICES = {
-        2: 1, # url_lutsk
-        3: SHK_SL_NEW_INDEX, # shtrih_cod (КЛЮЧ: 2)
-        4: OLD_SKU_SL_NEW_INDEX, # artykul_lutsk <- old_sku (4)
-        5: 19, # Позначки
-        6: 20, # rank_math_focus_keyword
-        7: 21, # postachalnyk (V)
-        8: 22, # post_status (W)
-        9: 23, # manage_stock (X)
-        10: 24, # tax_status (Y)
-        11: 25, # excerpt (Z)
-        # Атрибути з 12 до 34 (SL_old) <- з 26 до 48 (SL_new)
+        2: 1, # url_lutsk <- B(1)
+        3: SHK_SL_NEW_INDEX, # shtrih_cod <- C(2)
+        4: OLD_SKU_SL_NEW_INDEX, # artykul_lutsk <- E(5)
+        5: 19, # Позначки <- T(19)
+        6: 20, # rank_math_focus_keyword <- U(20)
+        7: 21, # postachalnyk <- V(21)
+        # 8: 22, # status <- W(22) - ВИДАЛЕНО!
+        8: 23, # manage_stock <- X(23) (ЗСУНУТО З 9 НА 8)
+        9: 24, # tax_status <- Y(24) (ЗСУНУТО З 10 НА 9)
+        10: 25, # excerpt <- Z(25) (ЗСУНУТО З 11 НА 10)
+        # Атрибути з 11 до 33 (SL_old) <- з 26 до 48 (SL_new)
     }
-    # Додаємо атрибути динамічно:
+    
+    # Додаємо атрибути динамічно (починаючи з індексу 11 в SL_old):
+    # У старому коді: (12 + i) -> (26 + i)
+    # У новому коді: (11 + i) -> (26 + i)
     for i in range(23): # 23 атрибути
-        MAPPING_INDICES[12 + i] = 26 + i
+        MAPPING_INDICES[11 + i] = 26 + i
     
     # Додаткові колонки (SL_old index -> SL_new index):
-    MAPPING_INDICES[35] = DESCRIPTION_SL_NEW_INDEX # content <- Описание (7)
-    MAPPING_INDICES[36] = 49  # post_date (AX)
-    MAPPING_INDICES[37] = 50  # attribute_none (AY)
-    MAPPING_INDICES[38] = 51  # product_type (AZ)
+    # 34: content (було 35) <- Описание (7)
+    # 35: post_date (було 36) <- AX (49)
+    # 36: attribute_none (було 37) <- AY (50)
+    # 37: product_type (було 38) <- AZ (51)
+    MAPPING_INDICES[34] = DESCRIPTION_SL_NEW_INDEX # content <- Описание (7)
+    MAPPING_INDICES[35] = 49 # post_date (AX)
+    MAPPING_INDICES[36] = 50 # attribute_none (AY)
+    MAPPING_INDICES[37] = 51 # product_type (AZ)
 
     items_to_keep: List[List[str]] = []
     items_to_move: List[List[str]] = []
@@ -1000,6 +1013,7 @@ def separate_existing_products():
 
             for row in reader:
                 
+                # Доповнюємо рядок, якщо він коротший за необхідний
                 if len(row) <= max_sl_new_index:
                     row.extend([''] * (max_sl_new_index + 1 - len(row)))
 
@@ -1009,15 +1023,16 @@ def separate_existing_products():
                 if shk_value and shk_value in zalishki_map:
                     item_id, item_sku = zalishki_map[shk_value]
                     
-                    new_row = [''] * len(sl_old_header)
+                    # Довжина нового рядка відповідає новій довжині заголовка (39 колонок: 0-38)
+                    new_row = [''] * len(sl_old_header) 
                     
                     # 1. ID та SKU з бази
                     new_row[0] = item_id 
                     new_row[1] = item_sku
                     
-                    # 2. Решта колонок з 1.csv
+                    # 2. Решта колонок з 1.csv згідно з виправленою мапою
                     for sl_old_idx, sl_new_idx in MAPPING_INDICES.items():
-                         new_row[sl_old_idx] = row[sl_new_idx]
+                        new_row[sl_old_idx] = row[sl_new_idx]
                     
                     items_to_move.append(new_row)
                     moved_shks.append(shk_value)
@@ -1045,7 +1060,7 @@ def separate_existing_products():
         logging.info(f"1.csv оновлено. Залишилося {len(items_to_keep) - 1} нових товарів для імпорту.")
 
     except Exception as e:
-        logging.error(f"Виникла непередбачена помилка під час звірки та перенесення: {e}")
+        logging.error(f"Виникла непередбачена помилка під час звірки та перенесення: {e}", exc_info=True)
         if os.path.exists(sl_new_temp_path):
             os.remove(sl_new_temp_path)
 
@@ -1281,27 +1296,55 @@ def download_images_for_product():
     def _copy_webp_to_site_folder(source_webp_path: str, site_uploads_path: str):
         """
         Копіює WEBP/GIF зображення з робочої папки до папки на сайті, 
-        зберігаючи структуру, та логує кількість файлів по папках.
+        встановлюючи правильні права доступу та власника (www-data).
         """
+        # --- КОНСТАНТИ ДЛЯ ВЛАСНИКА ФАЙЛІВ ---
+        # Зазвичай uid/gid користувача www-data на Debian/Ubuntu - 33
+        WWW_DATA_UID = 33 
+        WWW_DATA_GID = 33
+        # Права доступу, які ви вимагаєте: -rw-r--r-- (644) для файлів
+        FILE_PERMISSIONS = 0o644 
+        # Рекомендовані права для директорій: drwxr-xr-x (755)
+        DIR_PERMISSIONS = 0o755
         logging.info("Крок 6/6: Копіювання WEBP/GIF зображень до кінцевої папки на сайті.")
         copied_count = 0
         folder_copy_counts: Dict[str, int] = {}
         
+        # 1. Створення/перевірка кореневої папки
         if not os.path.isdir(site_uploads_path):
             try:
-                os.makedirs(site_uploads_path, exist_ok=True)
-                logging.warning(f"Створено кінцеву папку на сайті: {site_uploads_path}")
+                # Створюємо папку
+                os.makedirs(site_uploads_path, mode=DIR_PERMISSIONS, exist_ok=True)
+                # Встановлюємо власника та групу
+                os.chown(site_uploads_path, WWW_DATA_UID, WWW_DATA_GID)
+                logging.warning(f"Створено кінцеву папку на сайті: {site_uploads_path}, встановлено власника www-data.")
             except OSError as e:
-                logging.critical(f"Критична помилка: Не вдалося отримати доступ до папки сайту: {site_uploads_path}. {e}")
+                logging.critical(f"Критична помилка: Не вдалося створити/отримати доступ до папки сайту: {site_uploads_path}. {e}")
                 return 0
 
+        # 2. Обхід підпапок та файлів
         for root, _, files in os.walk(source_webp_path):
             relative_path = os.path.relpath(root, source_webp_path)
             destination_dir = os.path.join(site_uploads_path, relative_path)
             
             # Якщо це папка категорії (не корінь)
             if relative_path != ".":
-                os.makedirs(destination_dir, exist_ok=True)
+                # Створення папки категорії з правильними правами та власником
+                if not os.path.exists(destination_dir):
+                    try:
+                        os.makedirs(destination_dir, mode=DIR_PERMISSIONS, exist_ok=True)
+                        os.chown(destination_dir, WWW_DATA_UID, WWW_DATA_GID)
+                    except Exception as e:
+                        # Логуємо помилку і продовжуємо, можливо, папка вже була створена
+                        logging.error(f"Помилка створення/встановлення прав для папки {destination_dir}: {e}")
+                else:
+                    # Встановлюємо права, якщо папка вже існує, але має неправильні права
+                    try:
+                        os.chown(destination_dir, WWW_DATA_UID, WWW_DATA_GID)
+                        os.chmod(destination_dir, DIR_PERMISSIONS)
+                    except Exception as e:
+                        logging.error(f"Помилка встановлення прав для існуючої папки {destination_dir}: {e}")
+
 
             current_folder_count = 0
             
@@ -1312,11 +1355,20 @@ def download_images_for_product():
                     
                     try:
                         # Копіювання з метаданими
-                        shutil.copy2(source_file, destination_file)
+                        # Примітка: shutil.copy2 копіює права, але не власника.
+                        shutil.copy2(source_file, destination_file) 
+                        
+                        # *** КРИТИЧНИЙ КРОК: Встановлення власника та прав ***
+                        os.chown(destination_file, WWW_DATA_UID, WWW_DATA_GID)
+                        os.chmod(destination_file, FILE_PERMISSIONS)
+                        
                         copied_count += 1
                         current_folder_count += 1
                     except Exception as e:
-                        logging.error(f"Помилка копіювання файлу {source_file}: {e}")
+                        # Ця помилка [Errno 13] сталася, тому що користувач ubuntu не має 
+                        # прав на запис до /var/www/... або не може змінити власника.
+                        # Якщо ви запускаєте скрипт з-під ubuntu, вам потрібен sudo.
+                        logging.error(f"Помилка копіювання/встановлення прав для файлу {source_file}: {e}")
 
             if current_folder_count > 0 and relative_path != ".":
                 folder_copy_counts[relative_path] = current_folder_count
@@ -1559,3 +1611,151 @@ def create_new_products_import_file():
         if os.path.exists(temp_prod_file_path):
             os.remove(temp_prod_file_path)
 
+def update_existing_products_batch():
+    """
+    Завантажує дані з SL_old_prod_new_SHK.csv та виконує пакетне оновлення 
+    існуючих товарів у WooCommerce через REST API.
+    """
+    log_message_to_existing_file()
+    logging.info("🚀 Починаю пакетне оновлення існуючих товарів з SL_old_prod_new_SHK.csv...")
+
+    settings = load_settings()
+    if not settings:
+        logging.critical("❌ Не вдалося завантажити налаштування.")
+        return
+    # ... (перевірка шляхів та wcapi) ...
+    try:
+        csv_path = settings['paths']['csv_path_sl_old_prod_new_shk']
+    except KeyError as e:
+        logging.error(f"❌ Помилка конфігурації. Не знайдено шлях до CSV: {e}")
+        return
+
+    wcapi = get_wc_api(settings)
+    if not wcapi:
+        logging.critical("❌ Не вдалося створити об'єкт WooCommerce API.")
+        return
+    
+    BATCH_SIZE = 50 
+    products_to_update: List[Dict[str, Any]] = []
+    total_products_read = 0
+    total_updated = 0
+    total_skipped = 0
+    errors_list: List[str] = []
+    
+    start_time = time.time()
+    # ----------------------------------------
+    
+    try:
+        with open(csv_path, mode='r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            headers = next(reader)
+            logging.info(f"Зчитано {len(headers)} заголовків: {', '.join(headers[:5])}...")
+
+            STANDARD_FIELDS = ['sku', 'post_date', 'excerpt', 'content', 'product_type']
+            ACF_PREFIX = 'Мета: '
+            ATTRIBUTE_PREFIX = 'attribute:'
+            field_map: Dict[str, int] = {header: index for index, header in enumerate(headers)}
+
+            for row in reader:
+                total_products_read += 1
+                
+                # ... (перевірка ID) ...
+                product_id_str = row[field_map.get('id', -1)].strip()
+                if not product_id_str or not product_id_str.isdigit():
+                    errors_list.append(f"Рядок {total_products_read}: Пропущено. Не знайдено коректний ID товару.")
+                    total_skipped += 1
+                    continue
+                
+                product_data: Dict[str, Any] = {"id": int(product_id_str)}
+                meta_data: List[Dict[str, Any]] = []
+                attributes: List[Dict[str, Any]] = []
+
+                for key, index in field_map.items():
+                    if index >= len(row): continue
+                    value = row[index].strip()
+                    
+                    if key == 'id':
+                        continue
+                    elif key == 'manage_stock':
+                        product_data[key] = (value.lower() in ['yes', 'true', '1'])
+                    elif key.startswith(ACF_PREFIX):
+                        acf_key = key.replace(ACF_PREFIX, '')
+                        meta_data.append({"key": acf_key, "value": value})
+                    elif key == 'rank_math_focus_keyword':
+                        meta_data.append({"key": key, "value": value})
+                    
+                    elif key.startswith(ATTRIBUTE_PREFIX):
+                        # --- ВИПРАВЛЕННЯ АТРИБУТІВ ---
+                        # Отримуємо slug без 'attribute:' та 'pa_'
+                        attribute_name = key.replace(ATTRIBUTE_PREFIX, '')  # 'pa_made-in'
+                        if value:
+                            options_list = [v.strip() for v in value.split(',') if v.strip()] 
+                            if options_list:
+                                attributes.append({
+                                    # ❗ не ставимо id: 0 — WooCommerce сам знайде глобальний атрибут за ім’ям
+                                    "name": attribute_name,  # має бути 'pa_made-in'
+                                    "position": len(attributes),
+                                    "visible": True,
+                                    "variation": False,
+                                    "options": options_list,
+                                })
+                            
+                    elif key == 'Позначки':
+                         if value:
+                            tag_names = [t.strip() for t in value.split(',') if t.strip()]
+                            product_data['tags'] = [{"name": name} for name in tag_names]
+                    
+                    # --- ВИПРАВЛЕННЯ СТАНДАРТНИХ ПОЛІВ ---
+                    elif key in STANDARD_FIELDS or key == 'tax_status':
+                        if key == 'content':
+                            product_data['description'] = value
+                        elif key == 'excerpt':
+                            product_data['short_description'] = value
+                        elif key == 'post_date':
+                            if value:
+                                # WooCommerce приймає ISO 8601, тому можемо передати напряму
+                                product_data['date_created'] = value
+                                # Якщо хочеш бути максимально коректним – можна одразу задати GMT-версію
+                                try:
+                                    dt = datetime.fromisoformat(value)
+                                    product_data['date_created_gmt'] = (dt - timedelta(hours=3)).isoformat()
+                                except ValueError:
+                                    errors_list.append(f"⚠️ Рядок {total_products_read}: некоректний формат post_date '{value}'")
+                        else:
+                            product_data[key] = value
+                    # ------------------------------------
+
+                if meta_data:
+                    product_data['meta_data'] = meta_data 
+                if attributes:
+                    product_data['attributes'] = attributes
+                
+                products_to_update.append(product_data)
+
+                if len(products_to_update) >= BATCH_SIZE:
+                    total_updated += _process_batch_update(wcapi, products_to_update, errors_list)
+                    products_to_update = [] 
+            
+            if products_to_update:
+                total_updated += _process_batch_update(wcapi, products_to_update, errors_list)
+            
+    except Exception as e:
+        logging.critical(f"❌ Критична помилка під час читання/обробки CSV: {e}", exc_info=True)
+        return
+
+    # ... (Підсумок) ...
+    end_time = time.time()
+    elapsed_time = int(end_time - start_time)
+    
+    logging.info("--- 🏁 Підсумок оновлення існуючих товарів ---")
+    logging.info(f"Всього прочитано рядків: {total_products_read}")
+    logging.info(f"Успішно оновлено (або надіслано на оновлення) товарів: {total_updated}")
+    logging.info(f"Пропущено/з помилками: {total_products_read - total_updated}")
+    logging.info(f"Загальна тривалість: {elapsed_time} сек.")
+    
+    if errors_list:
+        logging.warning(f"⚠️ Знайдено {len(errors_list)} помилок/пропусків. Перші 5 помилок:")
+        for error in errors_list[:5]:
+            logging.warning(f"-> {error}")
+    else:
+        logging.info("✅ Оновлення завершено без помилок API/пропусків.")
