@@ -914,8 +914,8 @@ def separate_existing_products():
 
     # --- 0. Очищення SL_old_prod_new_SHK.csv (залишаємо лише заголовок) ---
     sl_old_header_base = [
-        'id', 'sku', 'url_lutsk', 'shtrih_cod', 'artykul_lutsk', 'Позначки', 
-        'rank_math_focus_keyword', 'postachalnyk', 'post_status', 'manage_stock', 
+        'id', 'sku', 'Мета: url_lutsk', 'Мета: shtrih_cod', 'Мета: artykul_lutsk', 'Позначки', 
+        'rank_math_focus_keyword', 'Мета: postachalnyk', 'status', 'manage_stock', 
         'tax_status', 'excerpt', 'attribute:pa_based', 'attribute:pa_color', 
         'attribute:pa_diameter', 'attribute:pa_efekt', 'attribute:pa_for-whom', 
         'attribute:pa_height', 'attribute:pa_length', 'attribute:pa_line-brand', 
@@ -1451,3 +1451,111 @@ def download_images_for_product():
     _copy_webp_to_site_folder(webp_dest_path, SITE_UPLOADS_PATH)
             
     logging.info("✅ Весь комплексний процес обробки зображень успішно виконано.")
+
+def create_new_products_import_file():
+    """
+    Очищає SL_new_prod.csv (крім заголовка, який ЗБЕРІГАЄТЬСЯ) 
+    і переносить дані з SL_new.csv.
+    """
+    # --- МАПА КОЛОНОК (SL_new_csv -> SL_new_prod.csv) ---
+    COLUMN_MAP = {
+        15: 0, 1: 1, 2: 2, 5: 3, 6: 4, 7: 5, 8: 6, 9: 7, 16: 8, 18: 9, 
+        19: 10, 20: 11, 21: 12, 22: 13,
+        23: 14, 24: 15, 25: 16, 26: 17, 27: 18, 28: 19, 29: 20, 30: 21, 
+        31: 22, 32: 23, 33: 24, 34: 25, 35: 26, 36: 27, 37: 28, 38: 29, 
+        39: 30, 40: 31, 41: 32, 42: 33, 43: 34, 44: 35, 45: 36, 46: 37, 
+        47: 38, 48: 39, 49: 40, 51: 41
+    }
+
+    MAX_TARGET_INDEX = max(COLUMN_MAP.values())
+    MAX_SOURCE_INDEX = max(COLUMN_MAP.keys())
+
+    logging.info("Починаю створення файлу SL_new_prod.csv для імпорту нових товарів.")
+
+    settings = load_settings()
+    try:
+        sl_new_path = settings['paths']['csv_path_supliers_1_new']
+        sl_new_prod_path = settings['paths']['csv_path_sl_new_prod']
+    except KeyError as e:
+        logging.critical(f"Помилка конфігурації. Не знайдено необхідний шлях у settings: {e}")
+        return
+
+    temp_prod_file_path = sl_new_prod_path + '.temp'
+    rows_to_write = []
+    processed_rows_count = 0
+    header = None # Змінна для зберігання оригінального заголовка
+
+    # 1. Читання та збереження оригінального заголовка з цільового файлу
+    try:
+        if not os.path.exists(sl_new_prod_path):
+            # Якщо файл не існує, ми не знаємо, якими мають бути заголовки.
+            logging.critical(f"Файл SL_new_prod.csv не знайдено за шляхом: {sl_new_prod_path}. Вам потрібно створити цей файл з правильними заголовками ВРУЧНУ перед запуском!")
+            return
+
+        # Читаємо заголовок, якщо файл існує
+        with open(sl_new_prod_path, mode='r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            header = next(reader)
+            rows_to_write.append(header) # Додаємо оригінальний заголовок до даних для запису
+            
+        logging.info(f"Знайдено та збережено оригінальний заголовок з {sl_new_prod_path}.")
+
+    except Exception as e:
+        logging.critical(f"Помилка при читанні заголовка {sl_new_prod_path}: {e}")
+        return
+
+    # 2. Читання SL_new.csv та перенесення даних
+    try:
+        if not os.path.exists(sl_new_path):
+            logging.critical(f"Вихідний файл SL_new.csv не знайдено за шляхом: {sl_new_path}")
+            return
+
+        with open(sl_new_path, mode='r', encoding='utf-8') as input_file:
+            reader = csv.reader(input_file)
+            source_rows = list(reader)
+
+        if len(source_rows) <= 1:
+            logging.warning(f"Файл {sl_new_path} містить лише заголовок або порожній. Дані для перенесення відсутні.")
+            # Якщо даних немає, записуємо файл лише з оригінальним заголовком (rows_to_write вже містить заголовок)
+            pass 
+        else:
+            source_rows_data = source_rows[1:] # Пропускаємо заголовок
+
+            for idx, source_row in enumerate(source_rows_data, start=1):
+                
+                if len(source_row) < MAX_SOURCE_INDEX + 1:
+                    logging.warning(f"Рядок {idx}: Пропущено через недостатню довжину даних ({len(source_row)} < {MAX_SOURCE_INDEX + 1}).")
+                    continue
+
+                # Створюємо рядок для цільового файлу з довжиною, що відповідає заголовку
+                target_row = [''] * (len(header) if header else (MAX_TARGET_INDEX + 1))
+                
+                # Перенесення даних згідно з мапою
+                for source_index, target_index in COLUMN_MAP.items():
+                    # Перевірка, чи не виходить індекс за межі заголовка
+                    if target_index < len(target_row):
+                        target_row[target_index] = source_row[source_index].strip()
+                
+                rows_to_write.append(target_row)
+                processed_rows_count += 1
+                
+            logging.info(f"Обробка SL_new.csv завершена. Знайдено {processed_rows_count} рядків для запису.")
+
+    except Exception as e:
+        logging.critical(f"Критична помибка під час читання/обробки SL_new.csv: {e}", exc_info=True)
+        return
+
+    # 3. Фінальний запис оновленого файлу
+    try:
+        with open(temp_prod_file_path, mode='w', encoding='utf-8', newline='') as output_file:
+            writer = csv.writer(output_file)
+            writer.writerows(rows_to_write)
+        
+        os.replace(temp_prod_file_path, sl_new_prod_path)
+        logging.info(f"Файл SL_new_prod.csv успішно оновлено. Записано {processed_rows_count} рядків даних, заголовок ЗБЕРЕЖЕНО.")
+
+    except Exception as e:
+        logging.error(f"Помилка під час фінального запису SL_new_prod.csv: {e}")
+        if os.path.exists(temp_prod_file_path):
+            os.remove(temp_prod_file_path)
+

@@ -5,7 +5,7 @@ from scr.products import export_products, download_supplier_price_list, process_
                         prepare_for_website_upload, update_products
 from scr.suppliers_1 import find_new_products, find_product_data, parse_product_attributes, apply_final_standardization, \
                         fill_product_category, refill_product_category, separate_existing_products, assign_new_sku_to_products, \
-                        download_images_for_product
+                        download_images_for_product, create_new_products_import_file
 
 
 def main():
@@ -139,10 +139,15 @@ def main():
     "--download-images",
     action="store_true",
     help="Комплексний процес: Завантаження зображень з URL (B/1) у папки категорій (Q/16), перейменування за SKU (P/15), оновлення SL_new.csv (R/17) та сортування GIF-файлів."
-)
+    )
 
 
-
+    # ✨ НОВИЙ АРГУМЕНТ для створення файлу імпорту нових товарів
+    parser.add_argument(
+    "--create-import-file",
+    action="store_true",
+    help="Створює файл SL_new_prod.csv для імпорту нових товарів, очищуючи його та переносячи дані з SL_new.csv."
+    )
 
 
     # 3. Парсинг аргументів
@@ -231,7 +236,10 @@ def main():
         print("🖼️ Запускаю комплексний процес завантаження, перейменування та сортування зображень...")
         download_images_for_product()
 
-
+    # ✨ Додаємо новий elif блок для створення файлу імпорту
+    elif args.create_import_file:
+        print("📋 Запускаю створення файлу SL_new_prod.csv...")
+        create_new_products_import_file()
 
 
     else:
