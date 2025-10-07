@@ -1,11 +1,14 @@
 from woocommerce import API
 import json
-import os
-import json
-import csv
+import os, csv, shutil, logging, requests, mimetypes, glob
 import logging
+import html
+import re
 from datetime import datetime
 from typing import Dict, Tuple, List, Optional, Any
+from PIL import Image
+from bs4 import BeautifulSoup
+import time
 
 
 def load_settings():
@@ -22,6 +25,8 @@ def load_settings():
     except json.JSONDecodeError:
         print(f"❌ Помилка: файл конфігурації пошкоджений: {config_path}")
         return None
+
+
 
 def get_wc_api(settings):
     """
@@ -49,6 +54,8 @@ def check_version():
         print("WooCommerce version:", data.get("environment", {}).get("version"))
     else:
         print("Error:", response.status_code, response.text)
+
+
 
 def setup_new_log_file():
     """
@@ -109,6 +116,8 @@ def log_message_to_existing_file():
         )
     logging.info("--- Повідомлення додано до існуючого логу ---")
 
+
+
 def check_csv_data(profile_id):
     """
     Перевіряє CSV-файл на відповідність правилам, визначеним у settings.json.
@@ -123,6 +132,9 @@ def check_csv_data(profile_id):
     # Цей блок відповідає за завантаження конфігурації з файлу settings.json
     # та перевіряє, чи існує вказаний профіль валідації.
     # Якщо налаштування не завантажено або профіль відсутній, функція завершує роботу.
+    
+    log_message_to_existing_file()
+    
     try:
         with open(os.path.join(os.path.dirname(__file__), "..", "config", "settings.json"), "r", encoding="utf-8") as f:
             settings = json.load(f)
@@ -151,10 +163,10 @@ def check_csv_data(profile_id):
     full_csv_path = os.path.join(base_dir, csv_path_relative)
     
     if not os.path.exists(full_csv_path):
-        logging.error(f"❌ Помилка: файл '{full_csv_path}' не знайдено.")
+        logging.error(f"❌ Помилка: файл для перевірки не знайдено.")
         return False
         
-    logging.info(f"🔎 Початок перевірки файлу: {os.path.basename(full_csv_path)}")
+    logging.info(f"🔎 Початок перевірки файлу")
     
     # 4. Читання та валідація даних
     # Відкриваємо файл та починаємо ітерацію по його вмісту.
@@ -199,6 +211,13 @@ def check_csv_data(profile_id):
                             return False
                         
                         value = row[col_index].strip()
+
+                        # 7.0. Перевірка на обов’язковість заповнення
+                        if rule_type == "not_empty":
+                            if not value:
+                                logging.error(f"❌ Рядок {row_number}, колонка '{col_name}': поле не повинно бути порожнім.")
+                                return False
+                            continue  # не перевіряємо далі
                         
                         # 7.1. Валідація цілих чисел
                         if rule_type == "integer":
@@ -226,6 +245,30 @@ def check_csv_data(profile_id):
                                 except ValueError:
                                     logging.error(f"❌ Рядок {row_number}, колонка '{col_name}': невірний формат дати-часу. Очікується 'YYYY-MM-DDTHH:MM:SS', але отримано '{value}'.")
                                     return False
+
+                        # 7.4. Валідація цілих чисел (допускає порожнє поле)
+                        if rule_type == "integer_or_empty":
+                            if value == "":
+                                continue  # Порожнє значення — дозволене
+                            if not value.lstrip('-').isdigit():
+                                logging.error(f"❌ Рядок {row_number}, колонка '{col_name}': очікується ціле число або порожнє поле, але отримано '{value}'.")
+                                return False
+
+                        # 7.5. Валідація чисел з плаваючою комою (float) (допускає порожнє поле)
+                        elif rule_type == "float_or_empty":
+                            if value == "":
+                                continue  # дозволяємо пусте поле
+
+                            # Дозволяємо європейський формат з комою — замінюємо на крапку
+                            normalized_value = value.replace(",", ".")
+                            try:
+                                float(normalized_value)
+                            except ValueError:
+                                logging.error(
+                                    f"❌ Рядок {row_number}, колонка '{col_name}': очікується число (float) або порожнє поле, "
+                                    f"але отримано '{value}'."
+                                )
+                                return False
                                     
                     except (ValueError, IndexError):
                         logging.error(f"❌ Непередбачена помилка в рядку {row_number}. Перевірка зупинена.")
@@ -235,7 +278,7 @@ def check_csv_data(profile_id):
         logging.error(f"❌ Виникла невідома помилка під час читання CSV: {e}", exc_info=True)
         return False
         
-    logging.info(f"✅ Перевірка файлу {os.path.basename(full_csv_path)} пройшла успішно.")
+    logging.info(f"✅ Перевірка файлу пройшла успішно.")
     return True
 
 def get_config_path(filename):
@@ -244,6 +287,8 @@ def get_config_path(filename):
     current_dir = os.path.dirname(os.path.abspath(__file__))
     config_dir = os.path.abspath(os.path.join(current_dir, '..', 'config'))
     return os.path.join(config_dir, filename)
+
+
 
 def load_attributes_csv():
     """
@@ -321,6 +366,8 @@ def save_attributes_csv(raw_data):
         logging.info("Файл атрибутів attribute.csv оновлено.")
     except Exception as e:
         logging.error(f"Помилка при збереженні файлу атрибутів attribute.csv: {e}")
+
+
 
 def load_category_csv():
     """
@@ -434,40 +481,153 @@ def load_poznachky_csv():
         logging.error(f"Виникла помилка при завантаженні poznachky.csv: {e}")
         return []
 
-def find_max_sku(zalishki_path: str) -> int:
-    """
-    Знаходить найбільше числове значення SKU в колонці B(1) файлу zalishki.csv.
-    """
-    SKU_ZALISHKI_INDEX = 1 # Колонка B
-    max_sku = 0
-    logging.info(f"Починаю пошук максимального SKU у файлі: {zalishki_path}")
+
+
+def clear_directory(folder_path: str):
+    """Очищає або створює директорію."""
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path, exist_ok=True)
+        return
+    for item in os.listdir(folder_path):
+        path = os.path.join(folder_path, item)
+        try:
+            if os.path.isfile(path) or os.path.islink(path):
+                os.unlink(path)
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
+        except Exception as e:
+            logging.error(f"❌ Не вдалося видалити {path}: {e}")
+
+def move_gifs(src: str, dest: str) -> int:
+    """Переміщує всі GIF із src у dest."""
+    moved = 0
+    os.makedirs(dest, exist_ok=True)
+    for root, _, files in os.walk(src):
+        for f in files:
+            if f.lower().endswith('.gif'):
+                src_path = os.path.join(root, f)
+                rel = os.path.relpath(src_path, src)
+                dest_path = os.path.join(dest, rel)
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                shutil.move(src_path, dest_path)
+                moved += 1
+    logging.info(f"🟣 Переміщено {moved} GIF-файлів.")
+    return moved
+
+def convert_to_webp_square(src: str, dest: str) -> int:
+    """Конвертує JPG/PNG → WEBP і вирівнює до квадрату."""
+    converted = 0
+    for root, _, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        out_dir = os.path.join(dest, rel)
+        os.makedirs(out_dir, exist_ok=True)
+        for f in files:
+            if not f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                continue
+            try:
+                img = Image.open(os.path.join(root, f))
+                w, h = img.size
+                max_side = max(w, h)
+                canvas = Image.new("RGB", (max_side, max_side), "white")
+                canvas.paste(img, ((max_side - w)//2, (max_side - h)//2))
+                new_name = os.path.splitext(f)[0] + '.webp'
+                canvas.save(os.path.join(out_dir, new_name), 'webp', quality=90)
+                converted += 1
+            except Exception as e:
+                logging.error(f"❌ WEBP-конвертація '{f}' не вдалася: {e}")
+    logging.info(f"🟢 WEBP-конвертовано {converted} зображень.")
+    return converted
+
+def download_product_images(url: str, sku: str, category: str, base_path: str, cat_map: Dict[str, str]) -> List[str]:
+    """Завантажує всі зображення товару з URL."""
+    cat_slug = cat_map.get(category.strip()) or category.strip().lower().replace(' ', '_').replace(',', '')
+    dest = os.path.join(base_path, cat_slug)
+    os.makedirs(dest, exist_ok=True)
 
     try:
-        with open(zalishki_path, mode='r', encoding='utf-8') as f:
-            reader = csv.reader(f)
-            next(reader) # Пропускаємо заголовок
-            
-            for row in reader:
-                if len(row) > SKU_ZALISHKI_INDEX:
-                    sku_str = row[SKU_ZALISHKI_INDEX].strip()
-                    try:
-                        # Припускаємо, що SKU є цілими числами (int)
-                        sku_int = int(sku_str)
-                        if sku_int > max_sku:
-                            max_sku = sku_int
-                    except ValueError:
-                        # Ігноруємо нечислові або порожні значення SKU
-                        pass
-        
-        logging.info(f"Знайдено максимальний SKU у базі: {max_sku}")
-        return max_sku
-    
-    except FileNotFoundError:
-        logging.error(f"Файл бази zalishki.csv не знайдено за шляхом: {zalishki_path}")
-        return 0
+        page = requests.get(url, timeout=10)
+        page.raise_for_status()
     except Exception as e:
-        logging.error(f"Помилка при читанні zalishki.csv для пошуку SKU: {e}")
+        logging.warning(f"⚠️ Не вдалося завантажити сторінку {url}: {e}")
+        return []
+
+    soup = BeautifulSoup(page.content, 'html.parser')
+    links = {a.get('href') for a in soup.find_all('a', class_='thumb_image_container') if a.get('href')}
+    files = []
+
+    for i, img_url in enumerate(links, 1):
+        try:
+            r = requests.get(img_url, timeout=10)
+            r.raise_for_status()
+            mime = r.headers.get('Content-Type')
+            ext = mimetypes.guess_extension(mime) or '.jpg'
+            fname = f"{sku}-{i}{ext}"
+            with open(os.path.join(dest, fname), 'wb') as f:
+                f.write(r.content)
+            files.append(fname)
+        except Exception:
+            continue
+    return files
+
+def sync_webp_column(sl_path: str, webp_path: str, col_index: int, sku_index: int) -> int:
+    """Оновлює колонку WEBP/GIF-списків у CSV."""
+    with open(sl_path, 'r', encoding='utf-8') as f:
+        reader = list(csv.reader(f))
+    if not reader:
         return 0
+
+    header, *rows = reader
+    sku_map = {}
+    for root, _, files in os.walk(webp_path):
+        for f in files:
+            if '-' in f and f.lower().endswith(('.webp', '.gif')):
+                sku = f.split('-')[0]
+                sku_map.setdefault(sku, []).append(f)
+
+    updated = 0
+    for row in rows:
+        if len(row) <= max(col_index, sku_index):
+            row.extend([''] * (max(col_index, sku_index) + 1 - len(row)))
+        sku = row[sku_index].strip()
+        if sku in sku_map:
+            row[col_index] = ', '.join(sorted(sku_map[sku]))
+            updated += 1
+    with open(sl_path, 'w', encoding='utf-8', newline='') as f:
+        csv.writer(f).writerows([header] + rows)
+    logging.info(f"🔁 Оновлено {updated} SKU у колонці WEBP.")
+    return updated
+
+def copy_to_site(src: str, dest: str):
+    """Копіює WEBP/GIF до фінальної директорії з правами."""
+    uid, gid = 33, 33
+    fperm, dperm = 0o644, 0o755
+    copied = 0
+
+    for root, _, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        out_dir = os.path.join(dest, rel)
+        os.makedirs(out_dir, mode=dperm, exist_ok=True)
+        for f in files:
+            if not f.lower().endswith(('.webp', '.gif')):
+                continue
+            src_f = os.path.join(root, f)
+            dst_f = os.path.join(out_dir, f)
+            shutil.copy2(src_f, dst_f)
+            try:
+                os.chown(dst_f, uid, gid)
+                os.chmod(dst_f, fperm)
+                copied += 1
+            except PermissionError:
+                logging.warning(f"⚠️ Немає прав для зміни власника {dst_f}")
+    logging.info(f"📦 Скопійовано {copied} файлів у {dest}.")
+    return copied
+
+
+
+
+
+
+
 
 def _process_batch_update(wcapi: Any, batch_data: List[Dict[str, Any]], errors_list: List[str]) -> int:
     """Виконує пакетний запит 'update' до WooCommerce API."""
@@ -506,44 +666,58 @@ def _process_batch_update(wcapi: Any, batch_data: List[Dict[str, Any]], errors_l
         return 0
     
 
-# --- ДОПОМІЖНА ФУНКЦІЯ ДЛЯ ПОШУКУ ID ЗОБРАЖЕННЯ (без змін) ---
-def _get_media_id_by_filename(wcapi: Any, filename: str) -> Optional[int]:
-    """Шукає ID медіафайлу за його іменем (title) або slug."""
-    
-    file_slug = os.path.splitext(filename)[0]
-    
-    # 1. Пошук за slug
-    try:
-        response = wcapi.get("media", params={'search': file_slug, 'per_page': 1, 'orderby': 'slug', 'order': 'asc'})
-        
-        if response.status_code == 200:
-            media_items = response.json()
-            if media_items:
-                item = media_items[0]
-                if item.get('slug') == file_slug or item.get('title', {}).get('rendered') == filename:
-                     return item['id']
-            
-    except Exception as e:
-        logging.error(f"Помилка при пошуку медіа ID для {filename}: {e}")
+def find_media_ids_for_sku(wcapi, sku: str, uploads_path: str) -> List[Dict[str, Any]]:
+    """
+    Знаходить усі зображення для SKU у uploads_path та повертає список ID для WooCommerce.
+    Підтримує різні розширення та підпапки.
+    """
+    def _get_media_id_by_filename(filename: str) -> int | None:
+        """Внутрішня функція: шукає ID медіа за slug або title"""
+        import requests
+
+        file_slug = os.path.splitext(filename)[0]
+
+        # Пошук за slug
+        try:
+            response = wcapi.get("media", params={'search': file_slug, 'per_page': 1, 'orderby': 'slug'})
+            if response.status_code == 200:
+                items = response.json()
+                if items:
+                    item = items[0]
+                    if item.get('slug') == file_slug or item.get('title', {}).get('rendered') == filename:
+                        return item['id']
+        except Exception as e:
+            logging.error(f"Помилка при пошуку медіа ID для {filename} (slug): {e}")
+
+        # Пошук за точним title
+        try:
+            response = wcapi.get("media", params={'search': filename, 'per_page': 1, 'orderby': 'title'})
+            if response.status_code == 200:
+                items = response.json()
+                if items:
+                    item = items[0]
+                    if item.get('title', {}).get('rendered') == filename:
+                        return item['id']
+        except Exception as e:
+            logging.error(f"Помилка при пошуку медіа ID для {filename} (title): {e}")
+
+        logging.warning(f"⚠️ Медіа ID для файлу '{filename}' не знайдено.")
         return None
 
-    # 2. Якщо перший пошук не вдався, спробуємо пошук за точним іменем файлу (Title)
-    try:
-        response = wcapi.get("media", params={'search': filename, 'per_page': 1, 'orderby': 'title', 'order': 'asc'})
-        
-        if response.status_code == 200:
-            media_items = response.json()
-            if media_items:
-                item = media_items[0]
-                if item.get('title', {}).get('rendered') == filename:
-                     return item['id']
-            
-    except Exception as e:
-        logging.error(f"Помилка при пошуку медіа ID для {filename}: {e}")
-        return None
-        
-    logging.warning(f"❌ Медіа ID для файлу '{filename}' не знайдено.")
-    return None
+    media_ids = []
+    pattern = os.path.join(uploads_path, '**', f'{sku}*.*')
+    files = glob.glob(pattern, recursive=True)
+    for file_path in files:
+        filename = os.path.basename(file_path)
+        media_id = _get_media_id_by_filename(filename)
+        if media_id:
+            media_ids.append({"id": media_id})
+
+    if not media_ids:
+        logging.warning(f"⚠️ SKU {sku}: Не знайдено зображень у '{uploads_path}'")
+    return media_ids
+
+
 
 # --- ДОПОМІЖНА ФУНКЦІЯ ДЛЯ ПАКЕТНОГО ЗАПИСУ (Створення) (без змін) ---
 def _process_batch_create(wcapi: Any, batch_data: List[Dict[str, Any]], errors_list: List[str]) -> int:
@@ -579,3 +753,112 @@ def _process_batch_create(wcapi: Any, batch_data: List[Dict[str, Any]], errors_l
         errors_list.append(err_msg)
         logging.critical(err_msg, exc_info=True)
         return 0
+    
+
+def _clean_text(value: str) -> str:
+    """Очищує HTML-теги, кодування і зайві пробіли."""
+    if not value:
+        return ""
+    value = html.unescape(str(value))  # розкодовує &#8211; → –
+    value = re.sub(r"<.*?>", "", value)  # видаляє HTML-теги
+    return value.strip()
+
+def export_product_by_id():
+    """
+    Експортує всі дані товару за введеним ID у /csv/input/ID_tovar.csv.
+    Виправлено HTML-кодування, екранування CSV і додано переклади WPML.
+    """
+    log_message_to_existing_file()
+    settings = load_settings()
+    if not settings:
+        logging.error("❌ Не вдалося завантажити налаштування.")
+        return
+
+    wcapi = get_wc_api(settings)
+    if not wcapi:
+        logging.error("❌ Не вдалося створити об'єкт WooCommerce API.")
+        return
+
+    product_id = input("Введіть ID товару для експорту: ").strip()
+    if not product_id.isdigit():
+        logging.error("❌ Некоректний ID товару.")
+        return
+    product_id = int(product_id)
+
+    output_dir = "/var/www/scripts/update/csv/input"
+    os.makedirs(output_dir, exist_ok=True)
+    csv_path = os.path.join(output_dir, "ID_tovar.csv")
+
+    start_time = time.time()
+    try:
+        # === Основні дані товару ===
+        response = wcapi.get(f"products/{product_id}", params={"context": "edit"})
+        if response.status_code != 200:
+            logging.error(f"❌ Помилка {response.status_code}: {response.text}")
+            return
+        product = response.json()
+        if not isinstance(product, dict):
+            logging.error(f"❌ Некоректна структура відповіді API для товару ID {product_id}")
+            return
+
+        row = {"id": product_id}
+
+        # === Основні поля ===
+        for key, value in product.items():
+            if isinstance(value, dict):
+                for subkey, subval in value.items():
+                    row[f"{key}.{subkey}"] = _clean_text(subval)
+            elif isinstance(value, list):
+                if key == "meta_data":
+                    for meta in value:
+                        k = meta.get("key")
+                        v = meta.get("value")
+                        if k:
+                            row[f"Мета: {k}"] = _clean_text(v)
+                elif key == "categories":
+                    row["categories"] = ", ".join([_clean_text(v.get("name", "")) for v in value])
+                elif key == "tags":
+                    row["tags"] = ", ".join([_clean_text(v.get("name", "")) for v in value])
+                elif key == "images":
+                    for idx, img in enumerate(value, start=1):
+                        row[f"image_{idx}_id"] = img.get("id", "")
+                        row[f"image_{idx}_src"] = img.get("src", "")
+                        row[f"image_{idx}_name"] = _clean_text(img.get("name", ""))
+                        row[f"image_{idx}_alt"] = _clean_text(img.get("alt", ""))
+                        row[f"image_{idx}_title"] = _clean_text(img.get("title", ""))
+                        row[f"image_{idx}_caption"] = _clean_text(img.get("caption", ""))
+                        row[f"image_{idx}_description"] = _clean_text(img.get("description", ""))
+                else:
+                    row[key] = ", ".join(map(_clean_text, map(str, value)))
+            else:
+                row[key] = _clean_text(value)
+
+        # === Переклади WPML ===
+        try:
+            wpml_resp = wcapi.get(f"products/{product_id}/translations")
+            if wpml_resp.status_code == 200:
+                translations = wpml_resp.json()
+                for lang, tr in translations.items():
+                    if isinstance(tr, dict):
+                        row[f"wpml_{lang}_id"] = tr.get("id", "")
+                        row[f"wpml_{lang}_name"] = _clean_text(tr.get("name", ""))
+                        row[f"wpml_{lang}_slug"] = tr.get("slug", "")
+                        row[f"wpml_{lang}_status"] = tr.get("status", "")
+        except Exception as e:
+            logging.warning(f"⚠️ Неможливо отримати WPML переклади: {e}")
+
+        # === Запис у CSV ===
+        file_exists = os.path.exists(csv_path)
+        file_is_empty = not file_exists or os.path.getsize(csv_path) == 0
+
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=row.keys(), quoting=csv.QUOTE_ALL)
+            if file_is_empty:
+                writer.writeheader()
+            writer.writerow(row)
+
+        elapsed = int(time.time() - start_time)
+        logging.info(f"✅ Експортовано товар ID {product_id} ({len(row)} полів) → {csv_path} за {elapsed} сек.")
+
+    except Exception as e:
+        logging.error(f"❌ Помилка під час експорту: {e}", exc_info=True)

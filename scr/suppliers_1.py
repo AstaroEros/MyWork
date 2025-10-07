@@ -12,8 +12,9 @@ from PIL import Image
 import logging
 from typing import Dict, Tuple, List, Optional, Any
 from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log_message_to_existing_file, load_attributes_csv, \
-                                save_attributes_csv, load_category_csv, save_category_csv, load_poznachky_csv, find_max_sku, \
-                                _process_batch_update, _get_media_id_by_filename, _process_batch_create
+                                save_attributes_csv, load_category_csv, save_category_csv, load_poznachky_csv, \
+                                _process_batch_update, find_media_ids_for_sku, _process_batch_create, clear_directory, \
+                                download_product_images, move_gifs, convert_to_webp_square, sync_webp_column, copy_to_site
 from datetime import datetime, timedelta
 
 
@@ -22,20 +23,24 @@ def find_new_products():
     Порівнює артикули товарів з прайс-листа постачальника з артикулами,
     що є на сайті, і записує нові товари в окремий файл.
     """
+    # --- 1. Ініціалізація логування ---
     log_message_to_existing_file()
-    logging.info("Починаю пошук нових товарів...")
+    logging.info("ФУНКЦІЯ 1. Починаю пошук нових товарів...")
     
+    # --- 2. Завантаження налаштувань з settings.json ---
     settings = load_settings()
     
-    zalishki_path = settings['paths']['csv_path_zalishki']
-    supliers_new_path = settings['paths']['csv_path_supliers_1_new']
-    supliers_csv_path = settings['suppliers']['1']['csv_path']
-    delimiter = settings['suppliers']['1']['delimiter']
+    # --- 3. Отримання шляхів до потрібних файлів ---
+    zalishki_path = settings['paths']['csv_path_zalishki']                   # База існуючих товарів
+    supliers_new_path = settings['paths']['csv_path_supliers_1_new']         # Файл, куди буде записано нові товари
+    supliers_csv_path = settings['suppliers']['1']['csv_path']               # Прайс-лист постачальника 1
+    delimiter = settings['suppliers']['1']['delimiter']                      # Роздільник у CSV
     
-    sku_prefix = settings['suppliers']['1']['search']
-    # Приводимо слова до нижнього регістру, щоб порівняння було незалежним від регістру
-    bad_words = [word.lower() for word in settings['suppliers']['1'].get('bad_words', [])]
-
+    # --- 4. Отримання допоміжних параметрів постачальника ---
+    sku_prefix = settings['suppliers']['1']['search']                        # Префікс для пошуку
+    bad_words = [word.lower() for word in settings['suppliers']['1'].get('bad_words', [])]  # Заборонені слова (фільтр)
+    
+    # --- 5. Отримання структури заголовків нового файлу ---
     new_product_headers = [
         settings['column_supliers_1_new_name'][str(i)]
         for i in range(len(settings['column_supliers_1_new_name']))
@@ -45,126 +50,161 @@ def find_new_products():
     logging.info("Зчитую існуючі артикули з файлу, вказаного за ключем 'csv_path_zalishki'.")
 
     try:
+        # --- 6. Зчитування існуючих артикулів із бази (zalishki.csv) ---
         with open(zalishki_path, mode='r', encoding='utf-8') as zalishki_file:
             zalishki_reader = csv.reader(zalishki_file)
-            next(zalishki_reader, None)
+            next(zalishki_reader, None)  # пропускаємо заголовок
             existing_skus = {row[9].strip().lower() for row in zalishki_reader if len(row) > 9}
-            logging.info(f"Зчитано {len(existing_skus)} унікальних артикулів.")
+            logging.info(f"Зчитано {len(existing_skus)} унікальних артикулів із бази.")
 
-        logging.info("Відкриваю файл для запису нових товарів, вказаний за ключем 'csv_path_supliers_1_new'.")
+        # --- 7. Підготовка нового файлу для запису нових товарів ---
+        logging.info("Відкриваю файл для запису нових товарів...")
         with open(supliers_new_path, mode='w', encoding='utf-8', newline='') as new_file:
             writer = csv.writer(new_file)
-            writer.writerow(new_product_headers)
+            writer.writerow(new_product_headers)  # записуємо заголовки
             
-            logging.info("Порівнюю дані з прайс-листом, вказаним за ключем 'csv_path' для постачальника 1.")
+            # --- 8. Зчитування прайс-листа постачальника ---
+            logging.info("Порівнюю дані з прайс-листом постачальника 1...")
             with open(supliers_csv_path, mode='r', encoding='utf-8') as supliers_file:
                 supliers_reader = csv.reader(supliers_file, delimiter=delimiter)
-                next(supliers_reader, None)
+                next(supliers_reader, None)  # пропускаємо заголовок
                 
+                # --- 9. Ініціалізація лічильників ---
                 new_products_count = 0
                 filtered_out_count = 0
+
+                # --- 10. Головний цикл: перевірка кожного товару ---
                 for row in supliers_reader:
                     if not row:
                         continue
                     
                     sku = row[0].strip().lower()
                     
+                    # --- 11. Перевіряємо, чи товар новий (відсутній у базі) ---
                     if sku and sku not in existing_skus:
                         
+                        # --- 12. Формуємо новий рядок за структурою SL_new.csv ---
                         new_row = [''] * num_new_columns
                         
+                        # Додаємо префікс до SKU
                         sku_with_prefix = sku_prefix + row[0]
                         new_row[0] = sku_with_prefix
 
+                        # --- 13. Мапування колонок з прайсу у новий CSV ---
                         column_mapping = [
-                            (0, 5),  # a(0) -> f(5)
-                            (1, 6),  # b(1) -> g(6)
-                            (2, 7),  # c(2) -> h(7)
-                            (3, 8),  # d(3) -> i(8)
-                            (6, 9),  # g(6) -> j(9)
-                            (7, 10), # h(7) -> k(10)
-                            (8, 11), # i(8) -> l(11)
-                            (9, 12), # j(9) -> m(12)
+                            (0, 5),   # a(0) -> f(5)
+                            (1, 6),   # b(1) -> g(6)
+                            (2, 7),   # c(2) -> h(7)
+                            (3, 8),   # d(3) -> i(8)
+                            (6, 9),   # g(6) -> j(9)
+                            (7, 10),  # h(7) -> k(10)
+                            (8, 11),  # i(8) -> l(11)
+                            (9, 12),  # j(9) -> m(12)
                             (10, 13), # k(10) -> n(13)
                             (11, 14), # l(11) -> o(14)
                         ]
-                        
                         for source_index, dest_index in column_mapping:
                             if len(row) > source_index:
                                 new_row[dest_index] = row[source_index]
                                 
+                        # --- 14. Фільтрація заборонених слів ---
                         should_skip = False
-                        check_columns_indices = [6, 7, 10]
+                        check_columns_indices = [6, 7, 10]  # колонки, де шукаємо заборонені слова
                         
                         for index in check_columns_indices:
                             if len(new_row) > index:
-                                # Приводимо вміст комірки до нижнього регістру
                                 cell_content = new_row[index].lower()
                                 for bad_word in bad_words:
                                     if bad_word in cell_content:
-                                        logging.info(f"Пропускаю товар з артикулом '{row[0]}' через заборонене слово '{bad_word}' в колонці {index} нового файлу.")
+                                        logging.info(
+                                            f"Пропускаю товар '{row[0]}' через слово '{bad_word}' "
+                                            f"в колонці {index} нового файлу."
+                                        )
                                         should_skip = True
                                         filtered_out_count += 1
                                         break
                                 if should_skip:
                                     break
                         
+                        # --- 15. Якщо товар має заборонене слово — пропускаємо ---
                         if should_skip:
                             continue
                         
+                        # --- 16. Якщо ні — додаємо у файл нових товарів ---
                         new_products_count += 1
                         writer.writerow(new_row)
 
-        logging.info(f"Знайдено {new_products_count} нових товарів. Відфільтровано {filtered_out_count} товарів.")
-        logging.info(f"Дані записано у файл, вказаний за ключем 'csv_path_supliers_1_new'.")
-    
+        # --- 17. Підсумкове логування ---
+        logging.info(f"✅ Знайдено {new_products_count} нових товарів.")
+        logging.info(f"🚫 Відфільтровано {filtered_out_count} товарів за забороненими словами.")
+        logging.info(f"Дані записано у файл csv 'supliers_new_path'.")
+
+    # --- 18. Обробка помилок ---
     except FileNotFoundError as e:
-        logging.info(f"Помилка: Файл не знайдено - {e}")
+        logging.info(f"❌ Помилка: Файл не знайдено - {e}")
     except Exception as e:
-        logging.info(f"Виникла непередбачена помилка: {e}")
+        logging.info(f"❌ Виникла непередбачена помилка: {e}")
 
 def find_product_data():
     """
     Зчитує файл з новими товарами, переходить за URL-адресою,
-    знаходить URL-адресу товару та штрих-код на сторінці,
-    і записує знайдену URL-адресу в колонку B(1) одразу після обробки.
+    знаходить URL-адресу простого або варіативного товару,
+    і записує знайдену URL-адресу в колонку B(1) в тимчасовий файл.
     """
+
+    # --- 1. Ініціалізація логування (підключаємо існуючий лог-файл) ---
     log_message_to_existing_file()
-    logging.info("Починаю пошук URL-адрес товарів та штрих-кодів...")
+    logging.info("ФУНКЦІЯ 2. Починаю пошук URL-адрес товарів...")
     
+    # --- 2. Завантаження налаштувань та формування шляхів/тимчасового файлу ---
     settings = load_settings()
-    supliers_new_path = settings['paths']['csv_path_supliers_1_new']
-    site_url = settings['suppliers']['1']['site']
-    temp_file_path = supliers_new_path + '.temp'
+    supliers_new_path = settings['paths']['csv_path_supliers_1_new']  # вхідний CSV (1.csv)
+    site_url = settings['suppliers']['1']['site']                    # базовий URL сайту (щоб додавати відносні посилання)
+    temp_file_path = supliers_new_path + '.temp'                     # тимчасовий файл під час запису
+
+    # --- Лічильники і статистика ---
+    total_rows = 0
+    found_variant_count = 0
+    found_simple_count = 0
+    not_found_count = 0
+    found_variant_rows = []
+    not_found_rows = []
 
     try:
-        # Зчитуємо дані з оригінального файлу
+        # --- 3. Відкриваємо вхідний файл для читання ---
         with open(supliers_new_path, mode='r', encoding='utf-8') as input_file:
             reader = csv.reader(input_file)
-            headers = next(reader)
-            
-            # Відкриваємо тимчасовий файл для запису
+            headers = next(reader)  # читаємо і зберігаємо заголовки (щоб переписати в тимчасовий файл)
+
+            # --- 4. Відкриваємо тимчасовий файл для поступового запису результатів ---
             with open(temp_file_path, mode='w', encoding='utf-8', newline='') as output_file:
                 writer = csv.writer(output_file)
-                writer.writerow(headers)
-                
-                for idx, row in enumerate(reader):
-                    search_url = row[0].strip()
-                    file_sku = row[5].strip()
+                writer.writerow(headers) # записуємо заголовки у тимчасовий файл
 
+                # --- 5. Ітерація по рядках вхідного файлу ---
+                for idx, row in enumerate(reader):
+                    total_rows += 1
+                    # 5.1. Витягуємо ключові поля із рядка
+                    search_url = row[0].strip()    # у вихідному файлі у колонці A може бути "посилання для пошуку"
+                    file_sku = row[5].strip()      # артикул (SKU) з колонки, яка відповідає індексу 5
+
+                    # --- 6. Перевірка валідності URL для пошуку ---
+                    # Якщо URL пустий або вже позначений як помилка запиту, пропускаємо рядок
                     if not search_url or search_url.startswith('Помилка запиту'):
-                        logging.warning(f"Рядок {idx + 2}: Пропускаю товар з артикулом '{file_sku}' через відсутність URL пошуку.")
                         writer.writerow(row)
                         continue
-                    
+
                     try:
+                        # --- 7. Виконання HTTP-запиту до search_url і парсинг HTML ---
                         response = requests.get(search_url)
                         response.raise_for_status()
                         soup = BeautifulSoup(response.text, 'html.parser')
+                        found_type = None  # 'variant' або 'simple'
+                        found_url = None  # сюди запишемо знайдену реальну URL-адресу товару
                         
-                        found_url = None
-                        
-                        # Пошук варіативних товарів
+                        # --- 8. Пошук варіативних товарів (input.variant_control[data-code]) ---
+                        # Шукаємо input теги з класом variant_control та атрибутом data-code,
+                        # порівнюємо data-code з file_sku — якщо співпадіння, беремо посилання у батьківському блоці.
                         variant_inputs = soup.find_all('input', class_='variant_control', attrs={'data-code': True})
                         for input_tag in variant_inputs:
                             site_sku = input_tag.get('data-code', '').strip()
@@ -173,11 +213,15 @@ def find_product_data():
                                 if parent_div:
                                     link_tag = parent_div.find('h4', class_='card-title').find('a')
                                     if link_tag and link_tag.has_attr('href'):
+                                        # Формуємо повний URL (додаємо site_url до відносного шляху)
                                         found_url = site_url + link_tag['href']
+                                        found_type = 'variant'
                                         break
-                        
+
+                        # --- 9. Якщо не знайшли серед варіантів — шукаємо прості товари ---
                         if not found_url:
-                            # Пошук простих товарів
+                            # Для простих товарів шукаємо div з класом 'radio', беремо текст як SKU,
+                            # і за таким же підходом знаходимо посилання у блоці card-block.
                             simple_divs = soup.find_all('div', class_='radio')
                             for div_tag in simple_divs:
                                 site_sku = div_tag.get_text(strip=True).strip()
@@ -187,31 +231,54 @@ def find_product_data():
                                         link_tag = parent_div.find('h4', class_='card-title').find('a')
                                         if link_tag and link_tag.has_attr('href'):
                                             found_url = site_url + link_tag['href']
+                                            found_type = 'simple'
                                             break
-                        
+
+                        # --- 10. Запис результату у колонку B (індекс 1) або логування якщо не знайдено ---
                         if found_url:
                             row[1] = found_url
-                            logging.info(f"Рядок {idx + 2}: Артикул '{file_sku}' - URL товару знайдено: {found_url}")
+                            if found_type == 'variant':
+                                found_variant_count += 1
+                                found_variant_rows.append(idx + 2)  # +2, бо рядки CSV рахуються з 1 + заголовок
+                            elif found_type == 'simple':
+                                found_simple_count += 1
                         else:
-                            logging.warning(f"Рядок {idx + 2}: Артикул '{file_sku}' - URL товару не знайдено.")
+                            not_found_count += 1
+                            not_found_rows.append(idx + 2)
 
+                        # Записуємо (знайдений або незмінений) рядок у тимчасовий файл
                         writer.writerow(row)
-                    
+
                     except requests.RequestException as e:
-                        logging.error(f"Рядок {idx + 2}: Помилка при запиті до {search_url}: {e}")
-                        row[0] = f'Помилка запиту: {e}'
+                        # --- 11. Обробка помилок HTTP-запиту: логування та маркування рядка ---
+                        logging.error(f"Рядок {idx + 2}: Помилка при запиті до урл: {e}")
+                        row[0] = f'Помилка запиту: {e}'  # позначаємо поле пошуку як помилкове
                         writer.writerow(row)
                     
+                    # --- 12. Додаткова пауза між запитами (рандомізована) для уникнення бана/DDOS ---
                     time.sleep(random.uniform(1, 3))
-
-        # Після успішної обробки перейменовуємо тимчасовий файл
+  
+        # --- 13. Після успішної обробки: заміна оригінального файлу тимчасовим ---
         os.replace(temp_file_path, supliers_new_path)
-        logging.info("Пошук завершено. Файл оновлено.")
+
+        # --- 14. Зведена статистика ---
+        logging.info("=== ПІДСУМКОВА ІНФОРМАЦІЯ ===")
+        logging.info(f"Всього рядків з товарами: {total_rows}")
+        logging.info(
+            f"Знайдено URL варіативних товарів: {found_variant_count}"
+            + (f" (Рядки {', '.join(map(str, found_variant_rows))})" if found_variant_rows else "")
+        )
+        logging.info(f"Знайдено URL простих товарів: {found_simple_count}")
+        logging.info(
+            f"Не знайдено URL: {not_found_count}"
+            + (f" (Рядки {', '.join(map(str, not_found_rows))})" if not_found_rows else "")
+        )
 
     except FileNotFoundError as e:
+        # --- 15. Обробка помилки: вхідний файл не знайдено ---
         logging.error(f"Помилка: Файл не знайдено - {e}")
     except Exception as e:
-        # Якщо сталася помилка, видаляємо тимчасовий файл, щоб уникнути пошкодження
+        # --- 16. Гарантійне прибирання: видаляємо тимчасовий файл при помилці, щоб не залишити сміття ---
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
         logging.error(f"Виникла непередбачена помилка: {e}")
@@ -220,10 +287,12 @@ def parse_product_attributes():
     """
     Парсить сторінки товарів, застосовує заміну з attribute.csv (блочна структура) 
     і додає нові невідомі значення одразу перед наступним блоком-заголовком.
+    Логування включає підсумок доданих атрибутів по колонках.
     """
     log_message_to_existing_file()
-    logging.info("Починаю парсинг сторінок товарів для вилучення атрибутів...")
+    logging.info("ФУНКЦІЯ 3. Починаю парсинг сторінок товарів для вилучення атрибутів...")
 
+    # --- 1. Завантаження налаштувань ---
     settings = load_settings()
     try:
         supliers_new_path = settings['paths']['csv_path_supliers_1_new']
@@ -232,168 +301,164 @@ def parse_product_attributes():
     except (TypeError, KeyError) as e:
         logging.error(f"Помилка доступу до налаштувань. Перевірте settings.json: {e}")
         return
-    
-    # Створюємо мапу для обробки атрибутів, виключаючи Штрих-код
-    processing_map = product_data_map.copy()
-    if "Штрих-код" in processing_map:
-        processing_map.pop("Штрих-код") 
 
+    # --- 2. Підготовка мапи для обробки (без Штрих-коду) ---
+    processing_map = {k: v for k, v in product_data_map.items() if k != "Штрих-код"}
+
+    # --- 3. Завантаження правил заміни та сирих даних ---
     replacements_map, raw_data = load_attributes_csv()
-    changes_made = False 
-
-    # Визначаємо максимальну довжину рядка для коректної вставки в attribute.csv
+    changes_made = False
     max_raw_row_len = len(raw_data[0]) if raw_data and raw_data[0] else 10
 
-    # === ЛОГІКА ДЛЯ ПОШУКУ МІСЦЯ ВСТАВКИ (КІНЕЦЬ БЛОКУ) ===
+    # --- 4. Підготовка точок вставки нових атрибутів ---
     insertion_points = {}
     current_col_index = None
-    
     for i, row in enumerate(raw_data[1:], start=1):
-        
-        is_header = row and row[0].strip().isdigit()
-        
-        if is_header:
-            try:
-                col_index = int(row[0].strip())
-                
-                if current_col_index is not None and current_col_index not in insertion_points:
-                    insertion_points[current_col_index] = i
-                
-                current_col_index = col_index
-                insertion_points[col_index] = i + 1 
-                
-            except ValueError:
-                current_col_index = None
-        
+        if row and row[0].strip().isdigit():
+            col_index = int(row[0].strip())
+            if current_col_index is not None and current_col_index not in insertion_points:
+                insertion_points[current_col_index] = i
+            current_col_index = col_index
+            insertion_points[col_index] = i + 1
         elif current_col_index is not None:
             insertion_points[current_col_index] = i + 1
-        
+
     logging.debug(f"Точки вставки (insertion_points): {insertion_points}")
-    # ==========================================
 
+    # --- 5. Словник для підрахунку нових атрибутів по колонках ---
+    new_attributes_counter = {}  # {col_index: count}
 
+    # --- 5.1 Список для контролю рядків без штрихкодів ---
+    missing_shk_rows = []  # [рядок_у_csv]
+
+    # --- 6. Обробка CSV постачальника ---
+    temp_file_path = supliers_new_path + '.temp'
     try:
-        with open(supliers_new_path, mode='r', encoding='utf-8') as input_file:
+        with open(supliers_new_path, mode='r', encoding='utf-8') as input_file, \
+             open(temp_file_path, mode='w', encoding='utf-8', newline='') as output_file:
+
             reader = csv.reader(input_file)
+            writer = csv.writer(output_file)
             headers = next(reader)
-            
-            temp_file_path = supliers_new_path + '.temp'
-            with open(temp_file_path, mode='w', encoding='utf-8', newline='') as output_file:
-                writer = csv.writer(output_file)
-                writer.writerow(headers)
-                
-                for idx, row in enumerate(reader):
-                    product_url = row[1].strip()
-                    file_sku = row[5].strip()
-                    
-                    # Визначаємо максимальний індекс для розширення рядка
-                    max_index = max(max(product_data_map.values(), default=0), other_attrs_index)
-                    if len(row) <= max_index:
-                        row.extend([''] * (max_index + 1 - len(row)))
-                        
-                    if not product_url or product_url.startswith('Помилка запиту'):
-                        writer.writerow(row)
-                        continue
+            writer.writerow(headers)
 
-                    try:
-                        response = requests.get(product_url)
-                        response.raise_for_status()
-                        soup = BeautifulSoup(response.text, 'html.parser')
-                        
-                        characteristics_div = soup.find('div', id='w0-tab0')
-                        
-                        if characteristics_div and characteristics_div.find('table'):
-                            parsed_attributes = {}
-                            for tr in characteristics_div.find('table').find_all('tr'):
-                                cells = tr.find_all('td')
-                                if len(cells) == 2:
-                                    key = cells[0].get_text(strip=True).replace(':', '')
-                                    value = cells[1].get_text(strip=True)
-                                    parsed_attributes[key] = value
+            for idx, row in enumerate(reader):
+                product_url = row[1].strip()
+                file_sku = row[5].strip()
 
-                            other_attributes = []
-                            for attr_name, attr_value in parsed_attributes.items():
-                                
-                                target_col_index = processing_map.get(attr_name)
-                                
-                                if target_col_index is not None:
-                                    # АТРИБУТИ, ЩО ЙДУТЬ В attribute.csv
-                                    
-                                    replacement_rules = replacements_map.get(target_col_index, {})
-                                    original_value_lower = attr_value.strip().lower() 
-                                    
-                                    new_value = replacement_rules.get(original_value_lower)
-                                    
-                                    # 1. Застосування заміни
-                                    if new_value is not None and new_value != "":
-                                        attr_value = new_value
-                                        
-                                    else:
-                                        # 2. Додавання нового атрибута, якщо його немає
-                                        if original_value_lower not in replacement_rules:
-                                            
-                                            insert_index = insertion_points.get(target_col_index)
-                                            
-                                            if insert_index is None:
-                                                logging.error(f"Атрибут '{attr_value}' (I={target_col_index}) не додано: відсутня точка вставки (заголовок не знайдено).")
-                                                attr_value = attr_value 
-                                                continue
-                                            
-                                            logging.warning(f"НОВИЙ АТРИБУТ БУДЕ ДОДАНО: '{attr_value}' (I={target_col_index}) в індекс {insert_index}.")
+                # Розширення рядка, якщо потрібно
+                max_index = max(max(product_data_map.values(), default=0), other_attrs_index)
+                if len(row) <= max_index:
+                    row.extend([''] * (max_index + 1 - len(row)))
 
-                                            # ВИПРАВЛЕННЯ: Коректне форматування нового рядка
-                                            new_raw_row = [''] * max_raw_row_len
-                                            new_raw_row[2] = original_value_lower # Оригінальне значення в колонку 2
-                                            
-                                            raw_data.insert(insert_index, new_raw_row)
-                                            
-                                            replacements_map.setdefault(target_col_index, {})[original_value_lower] = ""
-                                            changes_made = True 
-                                            
-                                            # Зсуваємо всі подальші точки вставки
-                                            for col, point in insertion_points.items():
-                                                if point >= insert_index:
-                                                    insertion_points[col] += 1
-                                            
-                                            attr_value = attr_value 
+                if not product_url or product_url.startswith('Помилка запиту'):
+                    writer.writerow(row)
+                    continue
 
-                                    row[target_col_index] = attr_value
-                                    
-                                elif attr_name == "Штрих-код":
-                                    # ОБРОБКА ШТРИХ-КОДУ: запис у 1.csv, ігнорування attribute.csv
-                                    shk_index = product_data_map.get("Штрих-код")
-                                    if shk_index is not None:
-                                        row[shk_index] = attr_value.strip()
-                                        logging.info(f"Штрих-код '{attr_value.strip()}' записано у колонку {shk_index}.")
-                                    else:
-                                        logging.warning("Штрих-код знайдено в HTML, але його індекс відсутній у повній мапі.")
-                                
-                                else:
-                                    # АТРИБУТИ, ЩО ЙДУТЬ В ДОДАТКОВУ КОЛОНКУ
-                                    other_attributes.append(f"{attr_name}:{attr_value}")
+                # --- 6.1 Парсинг сторінки ---
+                try:
+                    response = requests.get(product_url)
+                    response.raise_for_status()
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    characteristics_div = soup.find('div', id='w0-tab0')
+                    parsed_attributes = {}
+                    if characteristics_div and characteristics_div.find('table'):
+                        for tr in characteristics_div.find('table').find_all('tr'):
+                            cells = tr.find_all('td')
+                            if len(cells) == 2:
+                                key = cells[0].get_text(strip=True).replace(':', '')
+                                value = cells[1].get_text(strip=True)
+                                parsed_attributes[key] = value
 
-                            if other_attributes:
-                                row[other_attrs_index] = ', '.join(other_attributes)
-                                
-                            writer.writerow(row)
-                        
-                    except requests.RequestException as req_err:
-                        logging.error(f"Помилка запиту для URL {product_url}: {req_err}")
-                        writer.writerow(row)
-                    except Exception as e:
-                        logging.error(f"Непередбачена помилка парсингу для URL {product_url}: {e}")
-                        writer.writerow(row)
-                    
-                    time.sleep(random.uniform(1, 3))
+                    other_attributes = []
+
+                    # --- 6.2 Обробка атрибутів ---
+                    for attr_name, attr_value in parsed_attributes.items():
+                        target_col_index = processing_map.get(attr_name)
+                        original_value_lower = attr_value.strip().lower()
+
+                        if target_col_index is not None:
+                            replacement_rules = replacements_map.get(target_col_index, {})
+                            new_value = replacement_rules.get(original_value_lower)
+
+                            if new_value is not None and new_value != "":
+                                row[target_col_index] = new_value
+                            else:
+                                if original_value_lower not in replacement_rules:
+                                    insert_index = insertion_points.get(target_col_index)
+                                    if insert_index is None:
+                                        logging.error(f"Атрибут '{attr_value}' (I={target_col_index}) не додано: відсутня точка вставки.")
+                                        row[target_col_index] = attr_value
+                                        continue
+
+                                    # Додаємо новий атрибут у raw_data
+                                    new_raw_row = [''] * max_raw_row_len
+                                    new_raw_row[2] = original_value_lower
+                                    raw_data.insert(insert_index, new_raw_row)
+                                    replacements_map.setdefault(target_col_index, {})[original_value_lower] = ""
+                                    changes_made = True
+
+                                    # Зсуваємо точки вставки
+                                    for col, point in insertion_points.items():
+                                        if point >= insert_index:
+                                            insertion_points[col] += 1
+
+                                    # Підрахунок нових атрибутів
+                                    new_attributes_counter[target_col_index] = new_attributes_counter.get(target_col_index, 0) + 1
+
+                                row[target_col_index] = attr_value
+
+                        elif attr_name == "Штрих-код":
+                            shk_index = product_data_map.get("Штрих-код")
+                            if shk_index is not None:
+                                row[shk_index] = attr_value.strip()
+
+                        else:
+                            other_attributes.append(f"{attr_name}:{attr_value}")
+
+                    # --- 6.3 Перевірка наявності штрихкоду ---
+                    shk_index = product_data_map.get("Штрих-код")
+                    if shk_index is not None:
+                        if not row[shk_index].strip():
+                            missing_shk_rows.append(idx + 2)  # +2, бо заголовок = рядок 1
+
+                    if other_attributes:
+                        row[other_attrs_index] = ', '.join(other_attributes)
+
+                    writer.writerow(row)
+
+                except requests.RequestException as req_err:
+                    logging.error(f"Помилка запиту для URL {product_url}: {req_err}")
+                    writer.writerow(row)
+                except Exception as e:
+                    logging.error(f"Непередбачена помилка парсингу для URL {product_url}: {e}")
+                    writer.writerow(row)
+
+                time.sleep(random.uniform(1, 3))
 
         os.replace(temp_file_path, supliers_new_path)
         logging.info("Парсинг атрибутів завершено. Файл 1.csv оновлено.")
 
-        # Збереження оновлених сирих даних у CSV
+        # --- 7. Збереження attribute.csv та підсумковий лог ---
         if changes_made:
             save_attributes_csv(raw_data)
         else:
             logging.info("Збереження attribute.csv не потрібне. Змін: False.")
+
+        # --- 7.1 Підсумкове логування нових атрибутів ---
+        if new_attributes_counter:
+            logging.info("Підсумок доданих нових атрибутів по колонках:")
+            for col_index, count in sorted(new_attributes_counter.items()):
+                logging.info(f"Атрибут {col_index}, додано {count} нових атрибутів")
+        else:
+            logging.info("Нові атрибути не додані у жодну колонку.")
+
+        # --- 7.2 Логування відсутніх штрихкодів ---
+        if missing_shk_rows:
+            rows_str = ', '.join(map(str, missing_shk_rows))
+            logging.warning(f"УВАГА! Немає штрихкодів: {len(missing_shk_rows)} штуки (рядки {rows_str})")
+        else:
+            logging.info("Усі товари мають штрихкоди.")
 
     except Exception as e:
         logging.error(f"Виникла непередбачена помилка: {e}")
@@ -406,555 +471,517 @@ def apply_final_standardization():
     Замінює атрибути на значення з колонки 'attr_site_name', якщо воно існує.
     Проігноровані атрибути (з порожнім 'attr_site_name') очищаються.
     Атрибути, для яких не знайдено правил, залишаються без змін.
+    Логування включає інформацію про кількість замін та очищень.
     """
     log_message_to_existing_file()
-    logging.info("Починаю фінальну стандартизацію атрибутів у 1.csv...")
+    logging.info("ФУНКЦІЯ 4. Починаю фінальну стандартизацію атрибутів у 1.csv...")
 
+    # --- 1. Завантаження налаштувань ---
     settings = load_settings()
     try:
-        supliers_new_path = settings['paths']['csv_path_supliers_1_new']
-        # Ми використовуємо process_data_columns, щоб знайти назви колонок для логування
-        product_data_map = settings['suppliers']['1']['product_data_columns']
+        csv_path = settings['paths']['csv_path_supliers_1_new']
+        product_map = settings['suppliers']['1']['product_data_columns']
     except TypeError as e:
-        logging.error(f"Помилка доступу до налаштувань. Перевірте settings.json: {e}")
+        logging.error(f"Помилка доступу до налаштувань: {e}")
         return
-    
-    # Виключення Штрих-коду
-    processing_map = product_data_map.copy()
-    if "Штрих-код" in processing_map:
-        processing_map.pop("Штрих-код")
 
-    # 1. Завантаження фінальної мапи заміни
-    # replacements_map: {col_index: {original_value (lower): new_value (attr_site_name)}}
+    # --- 2. Підготовка мапи для обробки (без Штрих-коду) ---
+    processing_map = {k: v for k, v in product_map.items() if k != "Штрих-код"}
+
+    # --- 3. Завантаження правил заміни ---
     replacements_map, _ = load_attributes_csv()
-    
-    # 2. Обробка файлу csv
+
+    # --- 4. Підготовка статистики замін ---
+    replacement_counter = {}  # {col_index: count}
+    cleared_counter = {}      # {col_index: count}
+
+    # --- 5. Обробка CSV ---
+    temp_file_path = csv_path + '.final_temp'
     try:
-        temp_file_path = supliers_new_path + '.final_temp'
-        
-        with open(supliers_new_path, mode='r', encoding='utf-8') as input_file, \
-             open(temp_file_path, mode='w', encoding='utf-8', newline='') as output_file:
-            
-            reader = csv.reader(input_file)
-            writer = csv.writer(output_file)
-            
+        with open(csv_path, 'r', encoding='utf-8') as infile, \
+             open(temp_file_path, 'w', encoding='utf-8', newline='') as outfile:
+
+            reader = csv.reader(infile)
+            writer = csv.writer(outfile)
             headers = next(reader)
             writer.writerow(headers)
-            
-            # Словник для швидкого пошуку назви колонки за індексом для логування
-            column_indices = {index: col_name for col_name, index in processing_map.items()}
-            
+
+            # Словник для логування назв колонок
+            column_names = {index: name for name, index in processing_map.items()}
+
             for idx, row in enumerate(reader):
-                
-                # Перевірка та розширення рядка
-                max_index = max(product_data_map.values(), default=0)
+                max_index = max(product_map.values(), default=0)
                 if len(row) <= max_index:
                     row.extend([''] * (max_index + 1 - len(row)))
 
                 for col_index, rules in replacements_map.items():
-                    
-                    # 3. Перевірка та застосування правил
-                    if col_index < len(row):
-                        current_value = row[col_index].strip()
-                        
-                        if not current_value:
-                            continue # Пропускаємо порожні клітинки
+                    if col_index >= len(row):
+                        continue
 
-                        original_value_lower = current_value.lower()
-                        col_name = column_indices.get(col_index, f"I={col_index}")
-                        
-                        # Знаходимо стандартизоване значення (attr_site_name)
-                        new_value = rules.get(original_value_lower)
-                        
-                        # Перевірка: чи ЗНАЙДЕНО правило заміни (new_value is not None)
-                        if new_value is not None:
-                            
-                            # A) Якщо new_value (attr_site_name) НЕ порожнє - застосовуємо заміну
-                            if new_value:
-                                # Заміна лише якщо значення відрізняється
-                                if new_value != current_value:
-                                    row[col_index] = new_value
-                                    logging.info(f"Рядок {idx + 2}: ЗАМІНА ({col_name}): '{current_value}' -> '{new_value}'")
-                                else:
-                                    # Значення вже відповідає стандарту (new_value == current_value)
-                                    logging.debug(f"Рядок {idx + 2}: ЗНАЙДЕНО ({col_name}): Значення '{current_value}' вже стандартизовано.")
-                            
-                            # B) Якщо new_value (attr_site_name) ПОРОЖНЄ (вирішено ігнорувати/очистити)
-                            else:
-                                if current_value:
-                                    row[col_index] = "" # Очищаємо поле
-                                    logging.warning(f"Рядок {idx + 2}: ІГНОРУВАННЯ/ОЧИЩЕННЯ ({col_name}): Значення '{current_value}' очищено згідно з attribute.csv.")
+                    current_value = row[col_index].strip()
+                    if not current_value:
+                        continue
 
-                        # Якщо правило НЕ ЗНАЙДЕНО в replacements_map
+                    current_lower = current_value.lower()
+                    col_name = column_names.get(col_index, f"I={col_index}")
+                    new_value = rules.get(current_lower)
+
+                    if new_value is not None:
+                        if new_value:
+                            if new_value != current_value:
+                                row[col_index] = new_value
+                                replacement_counter[col_index] = replacement_counter.get(col_index, 0) + 1
+                                logging.info(f"Рядок {idx + 2}: ЗАМІНА ({col_name}): '{current_value}' -> '{new_value}'")
                         else:
-                            # Це означає, що атрибут не був раніше знайдений і доданий,
-                            # або ж є проблема з його форматуванням (пробіли, коми/крапки).
-                            # Ми залишаємо його без змін (якщо він був заповнений) і логуємо попередження.
-                            logging.warning(
-                                f"Рядок {idx + 2}: НЕ ЗНАЙДЕНО ПРАВИЛО ({col_name}): Значення '{current_value}' "
-                                f"залишено без змін, оскільки відсутнє у attribute.csv."
-                            )
-
+                            row[col_index] = ""
+                            cleared_counter[col_index] = cleared_counter.get(col_index, 0) + 1
+                            logging.warning(f"Рядок {idx + 2}: ІГНОРУВАННЯ/ОЧИЩЕННЯ ({col_name}): '{current_value}' очищено")
 
                 writer.writerow(row)
 
-        os.replace(temp_file_path, supliers_new_path)
+        os.replace(temp_file_path, csv_path)
         logging.info("Фінальна стандартизація завершена. csv оновлено.")
 
+        # --- 6. Підсумкове логування ---
+        if replacement_counter:
+            for col, count in sorted(replacement_counter.items()):
+                logging.info(f"Атрибут {col}: виконано {count} замін")
+        if cleared_counter:
+            for col, count in sorted(cleared_counter.items()):
+                logging.info(f"Атрибут {col}: очищено {count} значень")
+
     except FileNotFoundError as e:
-        logging.error(f"Помилка: Файл не знайдено - {e}")
+        logging.error(f"Файл не знайдено: {e}")
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
     except Exception as e:
-        logging.error(f"Виникла непередбачена помилка під час фіналізації: {e}")
+        logging.error(f"Непередбачена помилка при стандартизації: {e}")
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 
 def fill_product_category():
     """
-    1. Заповнює колонку Q (Категорія) на основі комбінацій M, N, O.
-    2. Заповнює колонку T (Позначки) на основі співпадінь у назві товару (G).
-    3. Заповнює колонку U (Rank Math Focus Keyword) очищеною назвою товару (G).
-    4. Заповнює колонки V, W, X, Y, AZ фіксованими значеннями.
-    5. Копіює перший абзац з H до Z (з урахуванням літерального \n).
-    6. Встановлює поточну дату у AX.
-    7. Встановлює значення pa_used із category.csv у колонку AV.
-    Працює лише з ID постачальника = 1.
+    Заповнює службові колонки у csv:
+    - Q (категорія) на основі M, N, O
+    - T (позначки) на основі назви товару G
+    - U (Rank Math) на основі назви товару G
+    - AV (pa_used) на основі category.csv
+    - V, W, X, Y, AZ фіксованими значеннями
+    - Z (короткий опис) з H
+    - AX (дата)
+    Працює тільки для постачальника з ID=1
     """
     log_message_to_existing_file()
-    logging.info("Починаю фінальне заповнення службових колонок у csv...")
+    logging.info("ФУНКЦІЯ 5. Починаю заповнення категорії та службових колонок...")
 
     settings = load_settings()
     try:
-        supliers_new_path = settings['paths']['csv_path_supliers_1_new'] 
-        FIXED_SUPPLIER_ID = 1 
-        
-        # Отримання значення для колонки V (name_ukr)
-        name_ukr_value = settings['suppliers']['1']['name_ukr'] 
-        
-        # Індекси колонок csv:
-        name_1_index = 12       # M
-        name_2_index = 13       # N
-        name_3_index = 14       # O
-        product_name_index = 6  # G (Ім'я товару)
-        description_index = 7   # H (Опис)
-        category_index = 16     # Q (Категорія)
-        poznachky_index = 19    # T (Позначки)
-        rank_math_index = 20    # U (Rank Math Focus Keyword)
-        
-        # --- НОВІ ІНДЕКСИ (ВНЕСЕНІ ЗМІНИ) ---
-        v_index = 21            # V (name_ukr)
-        w_index = 22            # W (фіксоване "0")
-        x_index = 23            # X (фіксоване "yes")
-        y_index = 24            # Y (фіксоване "none")
-        z_index = 25            # Z (Короткий опис)
-        av_index = 47           # AV (pa_used)
-        ax_index = 49           # AX (Дата)
-        az_index = 51           # AZ (Тип товару, "simple")
-        # ---------------------
-        
-        # Оновлюємо максимальний індекс
-        max_col_index = max(name_1_index, name_2_index, name_3_index, category_index, product_name_index, poznachky_index, rank_math_index, v_index, w_index, x_index, y_index, z_index, av_index, ax_index, az_index, description_index)
-        
+        csv_path = settings['paths']['csv_path_supliers_1_new']
+        supplier_id = 1
+        name_ukr = settings['suppliers']['1']['name_ukr']
     except (TypeError, KeyError) as e:
-        logging.error(f"Помилка доступу до налаштувань. Перевірте settings.json: {e}")
+        logging.error(f"Помилка налаштувань: {e}")
         return
 
-    # Завантаження правил категорій та позначок
-    category_map, raw_data_category = load_category_csv()
-    changes_made_category = False 
-    max_raw_row_len_category = len(raw_data_category[0]) if raw_data_category and raw_data_category[0] else 5
-    rules_category = category_map.get(FIXED_SUPPLIER_ID, {})
-    poznachky_list = load_poznachky_csv() 
-    
-    # === СТВОРЕННЯ МАПИ ДЛЯ AV (pa_used) ===
-    pa_used_map = {}
-    supplier_id_str = str(FIXED_SUPPLIER_ID)
-    
-    # category.csv має колонки: postachalnyk(0), name_1(1), name_2(2), name_3(3), category(4), pa_used(5)
-    for row in raw_data_category:
-        # Перевіряємо, чи рядок має мінімум 6 колонок
-        if len(row) > 5:
-            postachalnyk_value = row[0].strip()
-            
-            # ВАЖЛИВА ЗМІНА: Додаємо правило, якщо постачальник - "1" АБО порожній ""
-            is_valid_supplier = (postachalnyk_value == supplier_id_str) or (postachalnyk_value == '')
-            
-            if is_valid_supplier:
-                # Ключ: (name_1, name_2, name_3) у нижньому регістрі
-                key = tuple(v.strip().lower() for v in row[1:4])
-                # Значення: pa_used (індекс 5)
-                # Якщо правило з ID=1 вже є, порожнє правило його НЕ замінить.
-                # Якщо пусте правило вже є, правило з ID=1 його ЗАМІНИТЬ (якщо ми йдемо по порядку CSV).
-                # Оскільки rules_category (для Q) використовує логіку злиття, ми просто додаємо.
-                pa_used_map[key] = row[5].strip()
-            
-    logging.info(f"Створено pa_used_map. Знайдено {len(pa_used_map)} правил (включно з правилами без ID постачальника).")
-    # =======================================
+    # Індекси колонок
+    M, N, O = 12, 13, 14
+    G, H = 6, 7
+    Q, T, U = 16, 19, 20
+    Z, V, W, X, Y = 25, 21, 22, 23, 24
+    AV, AX, AZ = 47, 49, 51
 
-    # Визначаємо поточну дату у потрібному форматі (AX)
-    current_date_str = datetime.now().strftime('%Y-%m-%dT00:00:00') 
-    
-    # === ХЕЛПЕР: Пошук місця для вставки нового правила категорії ===
-    def get_category_insertion_point(supplier_id, raw_data):
-        insert_row_index = len(raw_data)
+    # Завантаження правил категорій і позначок
+    category_map, raw_category = load_category_csv()
+    rules_category = category_map.get(supplier_id, {})
+    poznachky_list = load_poznachky_csv()
+    changes_category = False
+    max_row_len_category = len(raw_category[0]) if raw_category else 5
+
+    # Створюємо мапу для pa_used
+    pa_used_map = {}
+    for row in raw_category:
+        if len(row) > 5 and (row[0].strip() == str(supplier_id) or row[0].strip() == ''):
+            key = tuple(v.strip().lower() for v in row[1:4])
+            pa_used_map[key] = row[5].strip()
+
+    logging.info(f"Завантажено {len(pa_used_map)} правил pa_used")
+
+    current_date = datetime.now().strftime('%Y-%m-%dT00:00:00')
+
+    # Функція для вставки нового рядка у category.csv
+    def get_insert_index(supplier_id, raw_data):
+        insert_index = len(raw_data)
         found_block = False
-        
-        for i, row in enumerate(raw_data):
-            if row and row[0].strip().isdigit():
+        for i, r in enumerate(raw_data):
+            if r and r[0].strip().isdigit():
                 try:
-                    current_id = int(row[0].strip())
-                    
-                    if current_id == supplier_id:
+                    cur_id = int(r[0].strip())
+                    if cur_id == supplier_id:
                         found_block = True
-                        insert_row_index = i + 1 
-                    
-                    elif current_id > supplier_id and found_block:
+                        insert_index = i + 1
+                    elif cur_id > supplier_id and found_block:
                         return i
-                    
                 except ValueError:
                     continue
-            
             elif found_block:
-                insert_row_index = i + 1 
+                insert_index = i + 1
+        return insert_index
 
-        return insert_row_index
-    # ===============================================================
-
+    temp_path = csv_path + '.category_temp'
     try:
-        temp_file_path = supliers_new_path + '.category_temp' 
-        
-        with open(supliers_new_path, mode='r', encoding='utf-8') as input_file, \
-             open(temp_file_path, mode='w', encoding='utf-8', newline='') as output_file:
-            
-            reader = csv.reader(input_file)
-            writer = csv.writer(output_file)
-            
+        with open(csv_path, 'r', encoding='utf-8') as infile, \
+             open(temp_path, 'w', encoding='utf-8', newline='') as outfile:
+
+            reader = csv.reader(infile)
+            writer = csv.writer(outfile)
             headers = next(reader)
             writer.writerow(headers)
-            
 
             for idx, row in enumerate(reader):
-                
-                # Гарантуємо, що рядок достатньої довжини
-                if len(row) <= max_col_index:
-                    row.extend([''] * (max_col_index + 1 - len(row)))
+                # Розширюємо рядок за потреби
+                max_col = max(M, N, O, Q, T, U, V, W, X, Y, Z, AV, AX, AZ, G, H)
+                if len(row) <= max_col:
+                    row.extend([''] * (max_col + 1 - len(row)))
 
-                # Отримання назви товару та опису
-                product_name = row[product_name_index].strip()
-                product_description = row[description_index]
-                
-                # Обчислюємо ключ, який буде використаний і для Q, і для AV
-                key_values = (row[name_1_index].strip(), row[name_2_index].strip(), row[name_3_index].strip())
-                search_key = tuple(v.lower() for v in key_values)
-                
-                # ===============================================
-                #           ЛОГІКА ЗАПОВНЕННЯ КАТЕГОРІЇ (Q/16)
-                # ===============================================
-                category_value = rules_category.get(search_key)
-                
-                if category_value is not None:
-                    if category_value:
-                        row[category_index] = category_value
-                    else:
-                        row[category_index] = ""
+                product_name = row[G].strip()
+                product_desc = row[H]
+
+                key = tuple(row[i].strip().lower() for i in (M, N, O))
+
+                # --- Категорія Q ---
+                category_val = rules_category.get(key)
+                if category_val is not None:
+                    row[Q] = category_val or ""
                 else:
-                    insert_index = get_category_insertion_point(FIXED_SUPPLIER_ID, raw_data_category)
-                    # NOTE: Тут додається новий рядок без ID постачальника в index 0! 
-                    new_raw_row = [''] + list(key_values) + [''] * (max_raw_row_len_category - 4)
-                    raw_data_category.insert(insert_index, new_raw_row)
-                    rules_category[search_key] = "" # Оновлюємо мапу для уникнення дублікатів
-                    changes_made_category = True 
-                    logging.warning(f"Рядок {idx + 2}: НОВА КОМБІНАЦІЯ КАТЕГОРІЇ: {key_values} додано.")
-                    
-                
-                # ===============================================
-                #           ЛОГІКА ЗАПОВНЕННЯ ПОЗНАЧОК (T/19)
-                # ===============================================
-                found_tags = []
+                    # Додаємо новий рядок у category.csv
+                    insert_idx = get_insert_index(supplier_id, raw_category)
+                    new_row = [''] + list(row[M:O+1]) + [''] * (max_row_len_category - 4)
+                    raw_category.insert(insert_idx, new_row)
+                    rules_category[key] = ""
+                    changes_category = True
+                    logging.warning(f"Рядок {idx + 2}: Додана нова комбінація категорії {key}")
+
+                # --- Позначки T ---
                 if product_name and poznachky_list:
-                    search_name = product_name.lower()
-                    covered_ranges = [] 
-                    
+                    found_tags = []
+                    covered = []
+                    name_lower = product_name.lower()
                     for tag in poznachky_list:
-                        tag_len = len(tag)
-                        if tag in search_name:
-                            start_index = search_name.find(tag)
-                            end_index = start_index + tag_len
-                            
-                            is_covered = False
-                            for covered_start, covered_end in covered_ranges:
-                                if start_index >= covered_start and end_index <= covered_end:
-                                    is_covered = True
-                                    break
-                                
-                            if not is_covered:
-                                found_tags.append(tag.capitalize()) 
-                                covered_ranges.append((start_index, end_index))
-                                covered_ranges.sort(key=lambda x: x[1] - x[0], reverse=True)
-
+                        if tag in name_lower:
+                            start, end = name_lower.find(tag), name_lower.find(tag) + len(tag)
+                            if not any(s <= start and end <= e for s, e in covered):
+                                found_tags.append(tag.capitalize())
+                                covered.append((start, end))
+                                covered.sort(key=lambda x: x[1]-x[0], reverse=True)
                     if found_tags:
-                        row[poznachky_index] = ', '.join(found_tags)
-                        
-                        
-                # ===============================================
-                #           ЛОГІКА ЗАПОВНЕННЯ RANK MATH (U/20)
-                # ===============================================
+                        row[T] = ', '.join(found_tags)
+
+                # --- Rank Math U ---
                 if product_name:
-                    cleaned_name = re.sub(r'[а-яА-Я]', '', product_name)
-                    cleaned_name = re.sub(r'[0-9]', '', cleaned_name)
-                    cleaned_name = re.sub(r'[^a-zA-Z\s]', '', cleaned_name)
-                    cleaned_name = re.sub(r'\s+', ' ', cleaned_name).strip()
-                    row[rank_math_index] = cleaned_name
+                    cleaned = re.sub(r'[а-яА-Я0-9]', '', product_name)
+                    cleaned = re.sub(r'[^a-zA-Z\s]', '', cleaned)
+                    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+                    row[U] = cleaned
+
+                # --- pa_used AV ---
+                pa_val = pa_used_map.get(key)
+                if pa_val:
+                    row[AV] = pa_val
 
 
-                # ===============================================
-                #           ЛОГІКА ЗАПОВНЕННЯ AV (pa_used)
-                # ===============================================
-                pa_used_value = pa_used_map.get(search_key)
-                
-                if pa_used_value:
-                    row[av_index] = pa_used_value
-                    logging.info(f"Рядок {idx + 2}: AV (pa_used) УСПІШНО ЗАПОВНЕНО значенням: '{pa_used_value}'. Ключ: {search_key}")
+                # --- Фіксовані колонки ---
+                row[V] = name_ukr
+                row[W] = "0"
+                row[X] = "yes"
+                row[Y] = "none"
+                row[AZ] = "simple"
+                row[AX] = current_date
+
+                # --- Короткий опис Z ---
+                if product_desc:
+                    row[Z] = product_desc.split('\\n', 1)[0].strip()
                 else:
-                    logging.warning(f"Рядок {idx + 2}: AV (pa_used) не заповнено. Шуканий ключ: {search_key}. (Знайдено правил: {len(pa_used_map)})")
+                    row[Z] = ""
 
-                
-                # ===============================================
-                #           ЛОГІКА ЗАПОВНЕННЯ ФІКСОВАНИХ КОЛОНОК
-                # ===============================================
-                
-                # V (21): Значення з settings.json
-                row[v_index] = name_ukr_value
-                
-                # W (22): Фіксоване "0"
-                row[w_index] = "0"
-                
-                # X (23): Фіксоване "yes"
-                row[x_index] = "yes"
-                
-                # Y (24): Фіксоване "none"
-                row[y_index] = "none"
-                
-                # AZ (51): Фіксоване "simple"
-                row[az_index] = "simple"
-                
-                # AX (49): Сьогоднішня дата
-                row[ax_index] = current_date_str
-                
-                # Z (25): Копіювати H(7) до першого абзацу
-                if product_description:
-                    # Шукаємо літеральну послідовність символів '\n'
-                    first_paragraph = product_description.split('\\n', 1)[0]
-                    
-                    row[z_index] = first_paragraph.strip()
-                else:
-                    row[z_index] = ""
-                
-                
                 writer.writerow(row)
 
-        os.replace(temp_file_path, supliers_new_path)
-        logging.info("Заповнення категорій, позначок та ключових слів завершено. 1.csv оновлено.")
+        os.replace(temp_path, csv_path)
+        logging.info("Заповнення категорій та службових колонок завершено.")
 
-        if changes_made_category:
-            save_category_csv(raw_data_category)
+        if changes_category:
+            save_category_csv(raw_category)
         else:
             logging.info("Збереження category.csv не потрібне. Змін: False.")
 
     except Exception as e:
-        logging.error(f"Виникла непередбачена помилка під час заповнення: {e}")
-        if 'supliers_new_path' in locals() and os.path.exists(temp_file_path): 
-            os.remove(temp_file_path)
+        logging.error(f"Помилка при заповненні колонок: {e}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 def refill_product_category():
     """
-    Повторно заповнює колонки Q (Категорія) та AV (pa_used) 
+    Повторно заповнює колонки Q (Категорія) та AV (pa_used) у 1.csv
     на основі оновлених правил у category.csv.
-    НЕ додає нові порожні рядки до category.csv.
+    НЕ додає нові рядки у category.csv.
+    Логування показує, які рядки оновлені.
     """
     log_message_to_existing_file()
-    logging.info("Починаю повторне заповнення категорій та pa_used у 1.csv...")
+    logging.info("Функція 6. Починаю повторне заповнення категорій та pa_used у 1.csv...")
 
+    # --- 1. Завантаження налаштувань ---
     settings = load_settings()
     try:
-    # ... (блок ініціалізації індексів та змінних) ...
-        supliers_new_path = settings['paths']['csv_path_supliers_1_new'] 
-        FIXED_SUPPLIER_ID = 1 
-        
-        # Індекси колонок 1.csv:
-        name_1_index = 12       # M
-        name_2_index = 13       # N
-        name_3_index = 14       # O
-        category_index = 16     # Q (Категорія)
-        av_index = 47           # AV (pa_used)
-        
-        # Визначаємо максимальний індекс, щоб забезпечити довжину рядка
-        max_col_index = max(name_1_index, name_2_index, name_3_index, category_index, av_index)
-        
+        csv_path = settings['paths']['csv_path_supliers_1_new']
+        supplier_id = 1
     except (TypeError, KeyError) as e:
-        logging.error(f"Помилка доступу до налаштувань. Перевірте settings.json: {e}")
+        logging.error(f"Помилка доступу до налаштувань: {e}")
         return
 
-    # Завантаження правил категорій. Нам потрібні category_map та raw_data_category для pa_used.
-    category_map, raw_data_category = load_category_csv()
-    
+    # --- 2. Індекси колонок CSV ---
+    # Використовуємо одразу числа, без довгих змінних
+    M, N, O = 12, 13, 14        # name_1, name_2, name_3
+    Q, AV = 16, 47              # Категорія та pa_used
+    max_index = max(M, N, O, Q, AV)
+    missing_category_rows = []  # список рядків з порожньою категорією
+
+    # --- 3. Завантаження правил категорій та pa_used ---
+    category_map, raw_category = load_category_csv()
     rules_category = {}
     pa_used_map = {}
-    supplier_id_str = str(FIXED_SUPPLIER_ID)
+    supplier_str = str(supplier_id)
 
-    for row in raw_data_category:
+    for row in raw_category:
         if len(row) > 5:
-            postachalnyk_value = row[0].strip()
-            
-            # Включаємо правила з ID=1 АБО порожнім ID
-            is_valid_supplier = (postachalnyk_value == supplier_id_str) or (postachalnyk_value == '')
-            
-            if is_valid_supplier:
-                key = tuple(v.strip().lower() for v in row[1:4])
-                
-                # Мапа для Категорії (Q)
-                if len(row) > 4:
-                    rules_category[key] = row[4].strip() 
-                
-                # Мапа для pa_used (AV)
-                if len(row) > 5:
-                    pa_used_map[key] = row[5].strip()
-    
-    logging.info(f"Зчитано {len(rules_category)} правил для Категорії (Q) та {len(pa_used_map)} правил для pa_used (AV).")
+            supplier_value = row[0].strip()
+            if supplier_value == supplier_str or supplier_value == '':
+                key = tuple(v.strip().lower() for v in row[1:4])  # комбінація M,N,O
+                rules_category[key] = row[4].strip() if len(row) > 4 else ""
+                pa_used_map[key] = row[5].strip() if len(row) > 5 else ""
 
+    logging.info(f"Зчитано {len(rules_category)} правил для Категорії (Q) та {len(pa_used_map)} правил для pa_used (AV)")
+
+    # --- 4. Обробка CSV ---
+    temp_path = csv_path + '.refill_temp'
+    updated_rows = 0
 
     try:
-        temp_file_path = supliers_new_path + '.refill_temp' 
-        updated_rows_count = 0
-        
-        with open(supliers_new_path, mode='r', encoding='utf-8') as input_file, \
-             open(temp_file_path, mode='w', encoding='utf-8', newline='') as output_file:
-            
-            reader = csv.reader(input_file)
-            writer = csv.writer(output_file)
-            
+        with open(csv_path, 'r', encoding='utf-8') as infile, \
+             open(temp_path, 'w', encoding='utf-8', newline='') as outfile:
+
+            reader = csv.reader(infile)
+            writer = csv.writer(outfile)
+
             headers = next(reader)
             writer.writerow(headers)
-            
 
             for idx, row in enumerate(reader):
-                
-                if len(row) <= max_col_index:
-                    row.extend([''] * (max_col_index + 1 - len(row)))
+                # Розширюємо рядок, щоб не виходити за межі
+                if len(row) <= max_index:
+                    row.extend([''] * (max_index + 1 - len(row)))
 
-                # 1. Готуємо ключ пошуку (M, N, O)
-                key_values = (row[name_1_index].strip(), row[name_2_index].strip(), row[name_3_index].strip())
-                search_key = tuple(v.lower() for v in key_values)
-                
-                initial_category = row[category_index].strip()
-                initial_pa_used = row[av_index].strip()
+                # --- 4.1 Ключ пошуку ---
+                key = tuple(row[i].strip().lower() for i in (M, N, O))
+                initial_category = row[Q].strip()
+                initial_pa_used = row[AV].strip()
                 row_changed = False
-                
-                # ===============================================
-                #           ПОВТОРНЕ ЗАПОВНЕННЯ КАТЕГОРІЇ (Q/16)
-                # ===============================================
-                category_value = rules_category.get(search_key)
-                
-                if category_value and category_value != initial_category: # Перевірка, що не порожнє і не те саме
-                    row[category_index] = category_value
+
+                # --- 4.2 Повторне заповнення Категорії Q ---
+                category_val = rules_category.get(key)
+                if category_val and category_val != initial_category:
+                    row[Q] = category_val
                     row_changed = True
-                    # ЗМІНА ЛОГУВАННЯ
-                    logging.info(f"Рядок {idx + 2}: Q (Категорія) оновлено. Ключ: {search_key}. Значення: '{category_value}'")
-                
-                
-                # ===============================================
-                #           ПОВТОРНЕ ЗАПОВНЕННЯ AV (pa_used/47)
-                # ===============================================
-                pa_used_value = pa_used_map.get(search_key)
-                
-                if pa_used_value and pa_used_value != initial_pa_used: # Перевірка, що не порожнє і не те саме
-                    row[av_index] = pa_used_value
+                    logging.info(f"Рядок {idx + 2}: Q (Категорія) оновлено. Ключ: {key}, Значення: '{category_val}'")
+
+                # --- 4.3 Повторне заповнення pa_used AV ---
+                pa_val = pa_used_map.get(key)
+                if pa_val and pa_val != initial_pa_used:
+                    row[AV] = pa_val
                     row_changed = True
-                    # ЗМІНА ЛОГУВАННЯ
-                    logging.info(f"Рядок {idx + 2}: AV (pa_used) оновлено. Ключ: {search_key}. Значення: '{pa_used_value}'")
-                
+                    logging.info(f"Рядок {idx + 2}: AV (pa_used) оновлено. Ключ: {key}, Значення: '{pa_val}'")
+
+                # Перевірка порожньої категорії після оновлення
+                if not row[Q].strip():
+                    missing_category_rows.append(idx + 2)  # зберігаємо номер рядка у файлі
+
                 if row_changed:
-                    updated_rows_count += 1
+                    updated_rows += 1
 
                 writer.writerow(row)
 
-        os.replace(temp_file_path, supliers_new_path)
-        logging.info(f"Повторне заповнення завершено. У csv оновлено {updated_rows_count} рядків.")
+        # --- 5. Замінюємо оригінальний CSV ---
+        os.replace(temp_path, csv_path)
+        logging.info(f"Повторне заповнення завершено. Оновлено {updated_rows} рядків.")
 
+        # --- Логування рядків з порожньою категорією ---
+        for row_num in missing_category_rows:
+            logging.warning(f"УВАГА рядок {row_num} не заповнена категорія!")
 
     except Exception as e:
-        logging.error(f"Виникла непередбачена помилка під час повторного заповнення: {e}")
-        if 'supliers_new_path' in locals() and os.path.exists(temp_file_path): 
-            os.remove(temp_file_path)
+        logging.error(f"Непередбачена помилка при повторному заповненні: {e}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 def separate_existing_products():
     """
-    Звіряє штрихкоди (C/2) 1.csv з базою (zalishki.csv),
-    переносить знайдені товари у SL_old_prod_new_SHK.csv та видаляє їх з 1.csv.
-    --- ВИПРАВЛЕНО: Видалено перенесення колонки 'status' ---
+    Звіряє штрихкоди 1.csv з базою (zalishki.csv),
+    переносить знайдені товари у old_prod_new_SHK.csv,
+    видаляє їх з 1.csv та формує підсумкову статистику.
+    Колонки та відповідності old -> new винесені у settings.json.
     """
     log_message_to_existing_file()
-    logging.info("Починаю звірку 1.csv зі штрихкодами бази (zalishki.csv)...")
+    logging.info("ФУНКЦІЯ 7. Починаю звірку 1.csv зі штрихкодами бази (zalishki.csv)...")
 
     settings = load_settings()
     try:
         sl_new_path = settings['paths']['csv_path_supliers_1_new']
         zalishki_path = settings['paths']['csv_path_zalishki']
         sl_old_prod_shk_path = settings['paths']['csv_path_sl_old_prod_new_shk']
+        column_mapping = settings['suppliers']['1']['column_mapping_sl_old_to_sl_new']
     except KeyError as e:
-        logging.error(f"Помилка конфігурації. Не знайдено шлях: {e}")
+        logging.error(f"Помилка конфігурації. Не знайдено шлях або мапу колонок: {e}")
         return
-        
-    # --- КРИТИЧНО НЕОБХІДНІ ЛОКАЛЬНІ ІНДЕКСИ ---
-    SHK_SL_NEW_INDEX = 2      # C (Штрихкод SL_new для звірки)
-    SHK_ZALISHKI_INDEX = 7    # H (Штрихкод у базі zalishki.csv)
-    ID_ZALISHKI_INDEX = 0     # A (ID у базі)
-    SKU_ZALISHKI_INDEX = 1    # B (SKU у базі)
-    DESCRIPTION_SL_NEW_INDEX = 7# H (Описание, мапиться до content)
-    OLD_SKU_SL_NEW_INDEX = 5  # E (old_sku, мапиться до artykul_lutsk)
 
-    # --- 0. Очищення SL_old_prod_new_SHK.csv (залишаємо лише заголовок) ---
-    sl_old_header_base = [
-        'id', 'sku', 'Мета: url_lutsk', 'Мета: shtrih_cod', 'Мета: artykul_lutsk', 'Позначки', 
-        'rank_math_focus_keyword', 'Мета: postachalnyk', 
-        #'status', # <-- ВИДАЛЕНО З ЗАГОЛОВКА
-        'manage_stock', 
-        'tax_status', 'excerpt', 'attribute:pa_based', 'attribute:pa_color', 
-        'attribute:pa_diameter', 'attribute:pa_efekt', 'attribute:pa_for-whom', 
-        'attribute:pa_height', 'attribute:pa_length', 'attribute:pa_line-brand', 
-        'attribute:pa_made-in', 'attribute:pa_manufacturer', 'attribute:pa_material', 
-        'attribute:pa_number-of-pieces', 'attribute:pa_peculiarities', 'attribute:pa_powered', 
-        'attribute:pa_presence-of-vibration', 'attribute:pa_size', 'attribute:pa_smell', 
-        'attribute:pa_taste', 'attribute:pa_texture', 'attribute:pa_type-of-control', 
-        'attribute:pa_type-of-packaging', 'attribute:pa_used', 'attribute:pa_volumen'
-    ]
-    # Додаємо content (AM) перед post_date (AX)
-    sl_old_header = sl_old_header_base + ['content', 'post_date', 'attribute_none', 'product_type'] 
-
+    # --- 0. Зчитування існуючого заголовка old_prod_new_SHK.csv ---
+    sl_old_header = []
     try:
+        if os.path.exists(sl_old_prod_shk_path):
+            with open(sl_old_prod_shk_path, mode='r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                sl_old_header = next(reader, [])
+        else:
+            logging.warning("Файл old_prod_new_SHK.csv не знайдено — створюю новий із заголовком за замовчуванням.")
+            sl_old_header_base = [
+                'id', 'sku', 'Мета: url_lutsk', 'Мета: shtrih_cod', 'Мета: artykul_lutsk', 'Позначки',
+                'rank_math_focus_keyword', 'Мета: postachalnyk', 'manage_stock', 'tax_status', 'excerpt'
+            ]
+            # Додаємо атрибути та додаткові колонки (без attribute_none)
+            sl_old_header = sl_old_header_base + [f'attribute_{i}' for i in range(1, 24)] + [
+                'content', 'post_date', 'product_type'
+            ]
+
+        # Очищаємо файл, але залишаємо заголовок
         with open(sl_old_prod_shk_path, mode='w', encoding='utf-8', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(sl_old_header)
-        logging.info("Файл SL_old_prod_new_SHK.csv очищено (залишено лише заголовок, оновлено структуру без 'status').")
+
+        logging.info("Файл old_prod_new_SHK.csv очищено, заголовок залишено без змін.")
     except Exception as e:
-        logging.error(f"Помилка при очищенні SL_old_prod_new_SHK.csv: {e}")
+        logging.error(f"Помилка при ініціалізації old_prod_new_SHK.csv: {e}")
         return
-    
-    # --- 1. Створення мапи штрихкодів бази ---
-    zalishki_map: Dict[str, Tuple[str, str]] = {} # {ШК: (ID, SKU)}
+
+    # --- 1. Зчитування бази штрихкодів ---
+    zalishki_map = {}  # {shk: (id, sku)}
+    try:
+        with open(zalishki_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            next(reader)  # пропускаємо заголовок
+            for row in reader:
+                if len(row) > 7:
+                    shk = row[7].strip()
+                    if shk:
+                        zalishki_map[shk] = (row[0].strip(), row[1].strip())
+        logging.info(f"Зчитано {len(zalishki_map)} унікальних штрихкодів з бази.")
+    except Exception as e:
+        logging.error(f"Помилка при читанні бази: {e}")
+        return
+
+    # --- 2. Обробка 1.csv та формування списків ---
+    items_to_keep = []
+    items_to_move = []
+
+    try:
+        with open(sl_new_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            header = next(reader)
+            items_to_keep.append(header)
+
+            for row in reader:
+                # Розширюємо рядок до максимального індексу у мапі
+                max_index = max(column_mapping.values())
+                if len(row) <= max_index:
+                    row.extend([''] * (max_index + 1 - len(row)))
+
+                shk_value = row[2].strip()  # C (Штрихкод)
+                if shk_value in zalishki_map:
+                    item_id, item_sku = zalishki_map[shk_value]
+
+                    # Формуємо новий рядок для old_prod_new_SHK.csv
+                    new_row = [''] * len(sl_old_header)
+                    new_row[0] = item_id
+                    new_row[1] = item_sku
+
+                    for sl_old_idx_str, sl_new_idx in column_mapping.items():
+                        sl_old_idx = int(sl_old_idx_str)  # перетворюємо ключ у int
+                        if sl_new_idx < len(row):
+                            new_row[sl_old_idx] = row[sl_new_idx]
+
+                    items_to_move.append(new_row)
+                else:
+                    items_to_keep.append(row)
+
+        # --- 3. Запис перенесених товарів ---
+        if items_to_move:
+            with open(sl_old_prod_shk_path, 'a', encoding='utf-8', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerows(items_to_move)
+            logging.info(f"Перенесено {len(items_to_move)} існуючих товарів у old_prod_new_SHK.csv.")
+        else:
+            logging.info("Не знайдено жодного товару з існуючим штрихкодом у базі.")
+
+        # --- 4. Запис оновленого 1.csv ---
+        temp_path = sl_new_path + '.temp'
+        with open(temp_path, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerows(items_to_keep)
+        os.replace(temp_path, sl_new_path)
+        logging.info(f"1.csv оновлено. Залишилось {len(items_to_keep)-1} нових товарів для імпорту.")
+
+    except Exception as e:
+        logging.error(f"Непередбачена помилка під час обробки 1.csv: {e}")
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+def assign_new_sku_to_products():
+    """
+    Знаходить найбільший SKU у zalishki.csv (сортує по колонці B(1))
+    і присвоює послідовні SKU товарам без SKU у колонці P(15) файлу 1.csv.
+    """
+    log_message_to_existing_file()
+    logging.info("ФУНКЦІЯ 8. Починаю присвоєння нових SKU товарам у 1.csv...")
+
+    # --- 1. Завантаження налаштувань ---
+    settings = load_settings()
+    try:
+        sl_new_path = settings['paths']['csv_path_supliers_1_new']
+        zalishki_path = settings['paths']['csv_path_zalishki']
+    except KeyError as e:
+        logging.error(f"Помилка конфігурації. Не знайдено шлях: {e}")
+        return
+
+    # --- 2. Визначення індексу SKU у 1.csv ---
+    SKU_COL_INDEX = 15  # P
+    ZALISHKI_SKU_INDEX = 1  # B
+
+    # --- 3. Знаходимо максимальний SKU у zalishki.csv ---
     try:
         with open(zalishki_path, mode='r', encoding='utf-8') as f:
             reader = csv.reader(f)
-            next(reader) # Пропускаємо заголовок
+            next(reader, None)  # пропускаємо заголовок
+            sku_list = []
             for row in reader:
-                if len(row) > SHK_ZALISHKI_INDEX:
-                    shk = row[SHK_ZALISHKI_INDEX].strip()
-                    item_id = row[ID_ZALISHKI_INDEX].strip()
-                    item_sku = row[SKU_ZALISHKI_INDEX].strip()
-                    if shk:
-                        zalishki_map[shk] = (item_id, item_sku)
-        logging.info(f"Зчитано {len(zalishki_map)} унікальних штрихкодів з бази.")
+                if len(row) > ZALISHKI_SKU_INDEX:
+                    val = row[ZALISHKI_SKU_INDEX].strip()
+                    if val.isdigit():
+                        sku_list.append(int(val))
+
+            if not sku_list:
+                logging.warning("У базі не знайдено жодного числового SKU. Присвоєння неможливе.")
+                return
+
+            sku_list.sort()
+            last_sku = sku_list[-1]
+            logging.info(f"Максимальний SKU у базі: {last_sku}")
+
     except FileNotFoundError:
         logging.error(f"Файл бази zalishki.csv не знайдено за шляхом: {zalishki_path}")
         return
@@ -962,809 +989,429 @@ def separate_existing_products():
         logging.error(f"Помилка при читанні zalishki.csv: {e}")
         return
 
-    # --- 2. Обробка 1.csv та перенесення ---
-    
-    # Мапа відповідності: SL_old_idx (вихідний файл) -> SL_new_idx (вхідний файл)
-    # Зверніть увагу: Колонка 'status' (SL_old index 8) ВИДАЛЕНА.
-    # Всі наступні індекси в SL_old зсунуті на 1.
-    MAPPING_INDICES = {
-        2: 1, # url_lutsk <- B(1)
-        3: SHK_SL_NEW_INDEX, # shtrih_cod <- C(2)
-        4: OLD_SKU_SL_NEW_INDEX, # artykul_lutsk <- E(5)
-        5: 19, # Позначки <- T(19)
-        6: 20, # rank_math_focus_keyword <- U(20)
-        7: 21, # postachalnyk <- V(21)
-        # 8: 22, # status <- W(22) - ВИДАЛЕНО!
-        8: 23, # manage_stock <- X(23) (ЗСУНУТО З 9 НА 8)
-        9: 24, # tax_status <- Y(24) (ЗСУНУТО З 10 НА 9)
-        10: 25, # excerpt <- Z(25) (ЗСУНУТО З 11 НА 10)
-        # Атрибути з 11 до 33 (SL_old) <- з 26 до 48 (SL_new)
-    }
-    
-    # Додаємо атрибути динамічно (починаючи з індексу 11 в SL_old):
-    # У старому коді: (12 + i) -> (26 + i)
-    # У новому коді: (11 + i) -> (26 + i)
-    for i in range(23): # 23 атрибути
-        MAPPING_INDICES[11 + i] = 26 + i
-    
-    # Додаткові колонки (SL_old index -> SL_new index):
-    # 34: content (було 35) <- Описание (7)
-    # 35: post_date (було 36) <- AX (49)
-    # 36: attribute_none (було 37) <- AY (50)
-    # 37: product_type (було 38) <- AZ (51)
-    MAPPING_INDICES[34] = DESCRIPTION_SL_NEW_INDEX # content <- Описание (7)
-    MAPPING_INDICES[35] = 49 # post_date (AX)
-    MAPPING_INDICES[36] = 50 # attribute_none (AY)
-    MAPPING_INDICES[37] = 51 # product_type (AZ)
-
-    items_to_keep: List[List[str]] = []
-    items_to_move: List[List[str]] = []
-    moved_shks: List[str] = []
-    
-    sl_new_temp_path = sl_new_path + '.temp'
-    max_sl_new_index = 51 # Найбільший індекс для перевірки довжини рядка
-
-    try:
-        with open(sl_new_path, mode='r', encoding='utf-8') as input_file:
-            reader = csv.reader(input_file)
-            
-            sl_new_header = next(reader)
-            items_to_keep.append(sl_new_header) 
-
-            for row in reader:
-                
-                # Доповнюємо рядок, якщо він коротший за необхідний
-                if len(row) <= max_sl_new_index:
-                    row.extend([''] * (max_sl_new_index + 1 - len(row)))
-
-                shk_value = row[SHK_SL_NEW_INDEX].strip()
-                
-                # Звірка штрихкоду
-                if shk_value and shk_value in zalishki_map:
-                    item_id, item_sku = zalishki_map[shk_value]
-                    
-                    # Довжина нового рядка відповідає новій довжині заголовка (39 колонок: 0-38)
-                    new_row = [''] * len(sl_old_header) 
-                    
-                    # 1. ID та SKU з бази
-                    new_row[0] = item_id 
-                    new_row[1] = item_sku
-                    
-                    # 2. Решта колонок з 1.csv згідно з виправленою мапою
-                    for sl_old_idx, sl_new_idx in MAPPING_INDICES.items():
-                        new_row[sl_old_idx] = row[sl_new_idx]
-                    
-                    items_to_move.append(new_row)
-                    moved_shks.append(shk_value)
-                else:
-                    items_to_keep.append(row)
-
-        
-        # --- 3. Запис результатів ---
-        
-        if items_to_move:
-            # Використовуємо 'a' для додавання даних, оскільки заголовок вже записано
-            with open(sl_old_prod_shk_path, mode='a', encoding='utf-8', newline='') as output_file: 
-                writer = csv.writer(output_file)
-                writer.writerows(items_to_move)
-            logging.info(f"Успішно перенесено {len(items_to_move)} існуючих товарів у SL_old_prod_new_SHK.csv.")
-            logging.info(f"Перенесені штрихкоди (товари вже є в базі): {', '.join(moved_shks)}")
-        else:
-            logging.info("Не знайдено жодного товару з існуючим штрихкодом у базі.")
-
-        with open(sl_new_temp_path, mode='w', encoding='utf-8', newline='') as output_file:
-            writer = csv.writer(output_file)
-            writer.writerows(items_to_keep)
-        
-        os.replace(sl_new_temp_path, sl_new_path)
-        logging.info(f"1.csv оновлено. Залишилося {len(items_to_keep) - 1} нових товарів для імпорту.")
-
-    except Exception as e:
-        logging.error(f"Виникла непередбачена помилка під час звірки та перенесення: {e}", exc_info=True)
-        if os.path.exists(sl_new_temp_path):
-            os.remove(sl_new_temp_path)
-
-def assign_new_sku_to_products():
-    """
-    Знаходить максимальний SKU у zalishki.csv і присвоює послідовні SKU 
-    товарам без SKU у колонці P(15) файлу 1.csv.
-    """
-    log_message_to_existing_file()
-    logging.info("Починаю процес присвоєння нових SKU товарам у 1.csv...")
-
-    settings = load_settings()
-    try:
-        sl_new_path = settings['paths']['csv_path_supliers_1_new']
-        zalishki_path = settings['paths']['csv_path_zalishki']
-    except KeyError as e:
-        logging.error(f"Помилка конфігурації. Не знайдено шлях: {e}")
-        return
-    NEW_SKU_SL_NEW_INDEX = 15 
-    # 1. Знаходимо найбільший SKU у базі
-    starting_sku = find_max_sku(zalishki_path)
-    if starting_sku == 0:
-        logging.warning("Не вдалося знайти максимальний SKU у базі або база порожня. Присвоєння SKU неможливе.")
-        return
-
-    next_sku = starting_sku + 1
-    sku_assigned_count = 0
-    
-    # 2. Обробка 1.csv
-    sl_new_temp_path = sl_new_path + '.temp'
+    # --- 4. Присвоєння нових SKU у 1.csv ---
+    next_sku = last_sku + 1
+    assigned_count = 0
+    temp_path = sl_new_path + '.temp'
 
     try:
         with open(sl_new_path, mode='r', encoding='utf-8', newline='') as input_file:
             reader = csv.reader(input_file)
-            header = next(reader)
-            
-            # Визначаємо мінімальну довжину рядка, яка нам потрібна
-            min_row_len = NEW_SKU_SL_NEW_INDEX + 1
+            header = next(reader, None)
+            rows = [header] if header else []
 
-            rows_to_write = [header]
-            
             for row in reader:
-                # Розширюємо рядок, якщо він занадто короткий, щоб не отримати IndexError
-                if len(row) < min_row_len:
-                    row.extend([''] * (min_row_len - len(row)))
-                
-                # Перевіряємо, чи є вже SKU в колонці P(15)
-                current_sku = row[NEW_SKU_SL_NEW_INDEX].strip()
+                if len(row) <= SKU_COL_INDEX:
+                    row.extend([''] * (SKU_COL_INDEX + 1 - len(row)))
 
-                # Ми присвоюємо новий SKU, якщо комірка P(15) порожня
+                current_sku = row[SKU_COL_INDEX].strip()
                 if not current_sku:
-                    # Присвоюємо новий послідовний SKU
-                    row[NEW_SKU_SL_NEW_INDEX] = str(next_sku)
+                    row[SKU_COL_INDEX] = str(next_sku)
+                    assigned_count += 1
                     next_sku += 1
-                    sku_assigned_count += 1
-                
-                rows_to_write.append(row)
 
-        # 3. Запис оновлених даних
-        if sku_assigned_count > 0:
-            with open(sl_new_temp_path, mode='w', encoding='utf-8', newline='') as output_file:
-                writer = csv.writer(output_file)
-                writer.writerows(rows_to_write)
-            
-            os.replace(sl_new_temp_path, sl_new_path)
-            logging.info(f"Успішно присвоєно {sku_assigned_count} нових SKU. Наступний SKU буде {next_sku}.")
+                rows.append(row)
+
+        # --- 5. Запис оновленого CSV ---
+        if assigned_count > 0:
+            with open(temp_path, mode='w', encoding='utf-8', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerows(rows)
+            os.replace(temp_path, sl_new_path)
+            logging.info(f"✅ Успішно присвоєно {assigned_count} нових SKU. Наступний SKU буде {next_sku}.")
         else:
-            logging.info("Усі товари в 1.csv вже мають SKU. Змін не внесено.")
+            logging.info("Усі товари вже мають SKU. Змін не внесено.")
 
     except FileNotFoundError:
-        logging.error(f"Файл 1.csv не знайдено за шляхом: {sl_new_path}")
+        logging.error(f"Файл 1.csv не знайдено за шляхом")
     except Exception as e:
-        logging.error(f"Виникла непередбачена помилка під час присвоєння SKU: {e}")
-        if os.path.exists(sl_new_temp_path):
-            os.remove(sl_new_temp_path)
+        logging.error(f"Непередбачена помилка під час присвоєння SKU: {e}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 def download_images_for_product():
     """
-    Комплексний процес обробки та розгортання зображень:
-    1. Очищення папок. 2. Завантаження (JPG-папка). 
-    3. Переміщення GIF. 4. Конвертація у WEBP та квадрат (WEBP-папка). 
-    5. Оновлення SL_new.csv (S/18). 
-    6. Копіювання WEBP/GIF на сайт (/wp-content/uploads/products).
+    6 етапів:
+      1. Очистка папок JPG та WEBP
+      2. Завантаження зображень у папку JPG
+      3. Переміщення GIF у WEBP
+      4. Конвертація JPG у WEBP
+      5. Оновлення CSV
+      6. Копіювання на сайт
     """
-    # --- КОНСТАНТИ ІНДЕКСІВ SL_new.csv ---
-    URL_INDEX = 1        # B (URL товару)
-    SKU_INDEX = 15       # P (SKU для імені файлу)
-    CATEGORY_INDEX = 16  # Q (Категорія для папки)
-    IMAGES_LIST_INDEX = 17 # R (Список JPG-файлів)
-    WEBP_LIST_INDEX = 18   # S (Список WEBP/GIF-файлів)
-
-    # --- КОНСТАНТА ДЛЯ ШЛЯХУ НА САЙТІ ---
-    SITE_UPLOADS_PATH = "/var/www/html/erosinua/public_html/wp-content/uploads/products" 
-
-
-
-    # -----------------------------------------------------------
-    # --- ВНУТРІШНІ ДОПОМІЖНІ ФУНКЦІЇ ---
-    # -----------------------------------------------------------
-
-    def _clear_directory_contents(folder_path: str):
-        """Безпечно видаляє весь вміст всередині директорії."""
-        if not os.path.exists(folder_path):
-            os.makedirs(folder_path, exist_ok=True)
-            return
-
-        logging.info(f"Очищення директорії: {folder_path}...")
-        for item in os.listdir(folder_path):
-            item_path = os.path.join(folder_path, item)
-            try:
-                if os.path.isfile(item_path) or os.path.islink(item_path):
-                    os.unlink(item_path)
-                elif os.path.isdir(item_path):
-                    shutil.rmtree(item_path)
-            except Exception as e:
-                logging.error(f'Не вдалося видалити {item_path}. Причина: {e}')
-        logging.info("Очищення завершено.")
-
-    def _move_gif_files(base_jpg_path: str, webp_dest_path: str):
-        """Шукає GIF-файли у підпапках base_jpg_path і переміщує їх до webp_dest_path."""
-        if not os.path.exists(webp_dest_path):
-            os.makedirs(webp_dest_path, exist_ok=True)
-            
-        logging.info("Крок 3/6: Починаю переміщення GIF-файлів...")
-        moved_count = 0
-        try:
-            for root, _, files in os.walk(base_jpg_path):
-                if root == base_jpg_path: continue 
-                for file in files:
-                    if file.lower().endswith('.gif'):
-                        source_path = os.path.join(root, file)
-                        relative_path = os.path.relpath(source_path, base_jpg_path)
-                        dest_path = os.path.join(webp_dest_path, relative_path)
-                        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-                        shutil.move(source_path, dest_path)
-                        moved_count += 1
-            logging.info(f"Переміщення GIF-файлів завершено. Переміщено {moved_count} файлів.")
-        except Exception as e:
-            logging.error(f"Помилка під час переміщення GIF-файлів: {e}")
-
-    def _download_images(
-        url: str, 
-        base_jpg_folder: str, 
-        category_name: str, 
-        product_sku: str, 
-        categories_map: Dict[str, str]
-    ) -> Optional[List[str]]:
-        """Парсить, завантажує зображення та зберігає їх у папку категорії (в base_jpg_folder)."""
-        folder_slug = categories_map.get(category_name.strip())
-        if not folder_slug:
-            folder_slug = category_name.strip().lower().replace(' ', '_').replace(',', '')
-        
-        target_path = os.path.join(base_jpg_folder, folder_slug)
-        os.makedirs(target_path, exist_ok=True)
-        
-        try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-        except requests.RequestException as e:
-            logging.error(f"Помилка запиту URL {url} для SKU {product_sku}: {e}")
-            return None
-
-        soup = BeautifulSoup(response.content, 'html.parser')
-        images = soup.find_all('a', class_='thumb_image_container')
-        
-        image_urls = {img.get('href') for img in images if img.get('href')}
-        filenames = []
-        
-        for idx, img_url in enumerate(image_urls, start=1):
-            try:
-                img_response = requests.get(img_url, timeout=10)
-                img_response.raise_for_status()
-                mime_type = img_response.headers.get('Content-Type')
-                
-                if mime_type == 'image/webp': ext = '.webp'
-                elif mime_type == 'image/png': ext = '.png'
-                elif mime_type == 'image/gif': ext = '.gif'
-                else: ext = mimetypes.guess_extension(mime_type) or '.jpg' 
-                
-                file_name = f"{product_sku}-{idx}{ext}"
-                file_path = os.path.join(target_path, file_name)
-                
-                with open(file_path, 'wb') as f:
-                    f.write(img_response.content)
-                
-                filenames.append(file_name)
-                
-            except requests.RequestException:
-                pass
-            except Exception as e:
-                logging.error(f"Непередбачена помилка при збереженні зображення {img_url}: {e}")
-                
-        return filenames
-
-
-    def _convert_and_resize(base_jpg_path: str, webp_dest_path: str):
-        """Конвертує всі зображення з JPG-папки у WEBP та робить їх квадратними."""
-        logging.info("Крок 4/6: Починаю конвертацію та модифікацію розмірів у WEBP.")
-        processed_count = 0
-        
-        for root, _, files in os.walk(base_jpg_path):
-            relative_path = os.path.relpath(root, base_jpg_path)
-            target_dir = os.path.join(webp_dest_path, relative_path)
-            os.makedirs(target_dir, exist_ok=True)
-
-            for file in files:
-                if file.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
-                    source_file_path = os.path.join(root, file)
-                    new_file_name = os.path.splitext(file)[0] + '.webp'
-                    target_file_path = os.path.join(target_dir, new_file_name)
-                    
-                    try:
-                        img = Image.open(source_file_path)
-                        width, height = img.size
-                        max_dim = max(width, height)
-                        
-                        if width != height:
-                            new_img = Image.new('RGB', (max_dim, max_dim), color='white')
-                            dx = (max_dim - width) // 2
-                            dy = (max_dim - height) // 2
-                            new_img.paste(img, (dx, dy))
-                            img = new_img
-
-                        img.save(target_file_path, 'webp', quality=90)
-                        processed_count += 1
-                        
-                    except Exception as e:
-                        logging.error(f"Помилка обробки файлу {source_file_path} під час WEBP-конвертації: {e}")
-                        
-        logging.info(f"WEBP-конвертацію завершено. Успішно оброблено {processed_count} файлів.")
-
-
-    def _copy_webp_to_site_folder(source_webp_path: str, site_uploads_path: str):
-        """
-        Копіює WEBP/GIF зображення з робочої папки до папки на сайті, 
-        встановлюючи правильні права доступу та власника (www-data).
-        """
-        # --- КОНСТАНТИ ДЛЯ ВЛАСНИКА ФАЙЛІВ ---
-        # Зазвичай uid/gid користувача www-data на Debian/Ubuntu - 33
-        WWW_DATA_UID = 33 
-        WWW_DATA_GID = 33
-        # Права доступу, які ви вимагаєте: -rw-r--r-- (644) для файлів
-        FILE_PERMISSIONS = 0o644 
-        # Рекомендовані права для директорій: drwxr-xr-x (755)
-        DIR_PERMISSIONS = 0o755
-        logging.info("Крок 6/6: Копіювання WEBP/GIF зображень до кінцевої папки на сайті.")
-        copied_count = 0
-        folder_copy_counts: Dict[str, int] = {}
-        
-        # 1. Створення/перевірка кореневої папки
-        if not os.path.isdir(site_uploads_path):
-            try:
-                # Створюємо папку
-                os.makedirs(site_uploads_path, mode=DIR_PERMISSIONS, exist_ok=True)
-                # Встановлюємо власника та групу
-                os.chown(site_uploads_path, WWW_DATA_UID, WWW_DATA_GID)
-                logging.warning(f"Створено кінцеву папку на сайті: {site_uploads_path}, встановлено власника www-data.")
-            except OSError as e:
-                logging.critical(f"Критична помилка: Не вдалося створити/отримати доступ до папки сайту: {site_uploads_path}. {e}")
-                return 0
-
-        # 2. Обхід підпапок та файлів
-        for root, _, files in os.walk(source_webp_path):
-            relative_path = os.path.relpath(root, source_webp_path)
-            destination_dir = os.path.join(site_uploads_path, relative_path)
-            
-            # Якщо це папка категорії (не корінь)
-            if relative_path != ".":
-                # Створення папки категорії з правильними правами та власником
-                if not os.path.exists(destination_dir):
-                    try:
-                        os.makedirs(destination_dir, mode=DIR_PERMISSIONS, exist_ok=True)
-                        os.chown(destination_dir, WWW_DATA_UID, WWW_DATA_GID)
-                    except Exception as e:
-                        # Логуємо помилку і продовжуємо, можливо, папка вже була створена
-                        logging.error(f"Помилка створення/встановлення прав для папки {destination_dir}: {e}")
-                else:
-                    # Встановлюємо права, якщо папка вже існує, але має неправильні права
-                    try:
-                        os.chown(destination_dir, WWW_DATA_UID, WWW_DATA_GID)
-                        os.chmod(destination_dir, DIR_PERMISSIONS)
-                    except Exception as e:
-                        logging.error(f"Помилка встановлення прав для існуючої папки {destination_dir}: {e}")
-
-
-            current_folder_count = 0
-            
-            for file in files:
-                if file.lower().endswith(('.webp', '.gif')):
-                    source_file = os.path.join(root, file)
-                    destination_file = os.path.join(destination_dir, file)
-                    
-                    try:
-                        # Копіювання з метаданими
-                        # Примітка: shutil.copy2 копіює права, але не власника.
-                        shutil.copy2(source_file, destination_file) 
-                        
-                        # *** КРИТИЧНИЙ КРОК: Встановлення власника та прав ***
-                        os.chown(destination_file, WWW_DATA_UID, WWW_DATA_GID)
-                        os.chmod(destination_file, FILE_PERMISSIONS)
-                        
-                        copied_count += 1
-                        current_folder_count += 1
-                    except Exception as e:
-                        # Ця помилка [Errno 13] сталася, тому що користувач ubuntu не має 
-                        # прав на запис до /var/www/... або не може змінити власника.
-                        # Якщо ви запускаєте скрипт з-під ubuntu, вам потрібен sudo.
-                        logging.error(f"Помилка копіювання/встановлення прав для файлу {source_file}: {e}")
-
-            if current_folder_count > 0 and relative_path != ".":
-                folder_copy_counts[relative_path] = current_folder_count
-
-        # Логування результатів
-        logging.info("--- Результати копіювання по папках ---")
-        for folder, count in folder_copy_counts.items():
-            logging.info(f"Папка '{folder}': перенесено {count} файлів.")
-        logging.info("---------------------------------------")
-        
-        logging.info(f"Копіювання завершено. Успішно скопійовано {copied_count} файлів до {site_uploads_path}.")
-        return copied_count
-
-
-    def _sync_webp_list_to_csv(sl_new_path: str, webp_dest_path: str, rows_to_keep: List[List[str]]) -> List[List[str]]:
-        """Синхронізує імена WEBP/GIF файлів з папки до колонки S(18)."""
-        logging.info("Крок 5/6: Синхронізація імен WEBP/GIF-файлів у SL_new.csv (колонка S/18).")
-        
-        # Створюємо мапу {SKU: [list_of_filenames]} шляхом сканування WEBP-папки
-        sku_to_webp_files = {}
-        for root, _, files in os.walk(webp_dest_path):
-            for file in files:
-                parts = file.split('-')
-                if len(parts) >= 2:
-                    sku_part = parts[0].strip()
-                    if sku_part.isdigit():
-                        sku_to_webp_files.setdefault(sku_part, []).append(file)
-
-        final_rows_to_write = [rows_to_keep[0]] # Зберігаємо заголовок
-        sync_count = 0
-        
-        for row in rows_to_keep[1:]: # Пропускаємо заголовок
-            current_sku = row[SKU_INDEX].strip()
-            
-            if current_sku in sku_to_webp_files:
-                # Сортування для порядку 1, 2, 3...
-                filenames = sorted(sku_to_webp_files[current_sku], key=lambda x: int(x.split('-')[1].split('.')[0]))
-                row[WEBP_LIST_INDEX] = ', '.join(filenames)
-                sync_count += 1
-            else:
-                row[WEBP_LIST_INDEX] = '' 
-
-            final_rows_to_write.append(row)
-        
-        logging.info(f"Синхронізацію CSV завершено. Оновлено {sync_count} SKU.")
-        return final_rows_to_write
-
-
-    # -----------------------------------------------------------
-    # --- ГОЛОВНИЙ ПОЧАТОК ЛОГІКИ ---
-    # -----------------------------------------------------------
-
     log_message_to_existing_file()
-    logging.info("Починаю комплексний процес обробки зображень (6 кроків)...")
+    logging.info("ФУНКЦІЯ 9. Початок процесу обробки зображень...")
 
     settings = load_settings()
     try:
-        sl_new_path = settings['paths']['csv_path_supliers_1_new']
-        base_jpg_path = settings['paths']['img_path_jpg'] 
-        webp_dest_path = settings['paths']['img_path_webp'] 
-        categories_map = settings['categories']
+        sl_new = settings['paths']['csv_path_supliers_1_new']
+        jpg_path = settings['paths']['img_path_jpg']
+        webp_path = settings['paths']['img_path_webp']
+        cat_map = settings['categories']
+        site_path = settings['paths']['site_path_images']
     except KeyError as e:
-        logging.error(f"Помилка конфігурації. Не знайдено необхідний шлях/категорію в settings: {e}")
-        return
-    
-    # КРОК 1: ОЧИЩЕННЯ ПАПОК
-    _clear_directory_contents(base_jpg_path)
-    _clear_directory_contents(webp_dest_path)
-
-    MIN_ROW_LEN = max(IMAGES_LIST_INDEX, WEBP_LIST_INDEX) + 1
-    temp_file_path = sl_new_path + '.temp_img'
-    rows_to_keep = []
-    
-    # КРОК 2: ЦИКЛ ЗАВАНТАЖЕННЯ ЗОБРАЖЕНЬ (до JPG-папки)
-    try:
-        with open(sl_new_path, mode='r', encoding='utf-8') as input_file:
-            reader = csv.reader(input_file)
-            header = next(reader)
-            
-            if len(header) < MIN_ROW_LEN:
-                header.extend([''] * (MIN_ROW_LEN - len(header)))
-            rows_to_keep.append(header)
-            
-            logging.info("Крок 2/6: Починаю завантаження зображень (до JPG-папки)...")
-            data_rows = list(reader)
-            
-            for idx, row in enumerate(data_rows, start=1):
-                
-                if len(row) < MIN_ROW_LEN:
-                    row.extend([''] * (MIN_ROW_LEN - len(row)))
-                
-                url = row[URL_INDEX].strip()
-                sku = row[SKU_INDEX].strip()
-                category = row[CATEGORY_INDEX].strip()
-
-                if url and sku and category:
-                    filenames = _download_images(url, base_jpg_path, category, sku, categories_map)
-                    if filenames is not None:
-                        row[IMAGES_LIST_INDEX] = ', '.join(filenames) # Записуємо в R(17)
-                    else:
-                        row[IMAGES_LIST_INDEX] = 'Помилка завантаження'
-
-                rows_to_keep.append(row)
-                time.sleep(random.uniform(0.5, 2)) 
-
-    except Exception as e:
-        logging.error(f"Критична помилка під час обробки CSV/завантаження: {e}", exc_info=True)
+        logging.error(f"❌ Не знайдено шлях у settings.json: {e}")
         return
 
-    # КРОК 3: ПЕРЕМІЩЕННЯ GIF-ФАЙЛІВ (З JPG до WEBP папки)
-    _move_gif_files(base_jpg_path, webp_dest_path)
-    
-    # КРОК 4: КОНВЕРТАЦІЯ У WEBP ТА КВАДРАТ (З JPG до WEBP папки)
-    _convert_and_resize(base_jpg_path, webp_dest_path)
+    URL, SKU, CAT, IMG_LIST, WEBP_LIST = 1, 15, 16, 17, 18
 
-    # КРОК 5: СИНХРОНІЗАЦІЯ WEBP-ФАЙЛІВ У CSV (Колонка S/18)
-    final_rows_to_write = _sync_webp_list_to_csv(sl_new_path, webp_dest_path, rows_to_keep)
-    
-    # ФІНАЛЬНИЙ ЗАПИС CSV
-    try:
-        with open(temp_file_path, mode='w', encoding='utf-8', newline='') as output_file:
-            writer = csv.writer(output_file)
-            writer.writerows(final_rows_to_write)
-        os.replace(temp_file_path, sl_new_path)
-    except Exception as e:
-        logging.error(f"Критична помилка під час фінального запису CSV: {e}", exc_info=True)
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-        return
-    
-    # КРОК 6: КОПІЮВАННЯ НА САЙТ
-    _copy_webp_to_site_folder(webp_dest_path, SITE_UPLOADS_PATH)
-            
-    logging.info("✅ Весь комплексний процес обробки зображень успішно виконано.")
+    # 1️⃣ Очистка
+    clear_directory(jpg_path)
+    clear_directory(webp_path)
+
+    # 2️⃣ Завантаження
+    rows = []
+    with open(sl_new, 'r', encoding='utf-8') as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        rows.append(header)
+        for row in reader:
+            if len(row) <= IMG_LIST:
+                row.extend([''] * (IMG_LIST - len(row) + 1))
+            url, sku, cat = row[URL].strip(), row[SKU].strip(), row[CAT].strip()
+            if url and sku and cat:
+                imgs = download_product_images(url, sku, cat, jpg_path, cat_map)
+                row[IMG_LIST] = ', '.join(imgs) if imgs else ''
+            rows.append(row)
+            time.sleep(random.uniform(0.5, 1.5))
+
+    with open(sl_new, 'w', encoding='utf-8', newline='') as f:
+        csv.writer(f).writerows(rows)
+    logging.info(f"📥 Завантаження зображень завершено ({len(rows)-1} рядків).")
+
+    # 3️⃣ GIF
+    move_gifs(jpg_path, webp_path)
+
+    # 4️⃣ WEBP
+    convert_to_webp_square(jpg_path, webp_path)
+
+    # 5️⃣ CSV sync
+    sync_webp_column(sl_new, webp_path, WEBP_LIST, SKU)
+
+    # 6️⃣ Копіювання
+    copy_to_site(webp_path, site_path)
+
+    logging.info("✅ Усі 6 етапів обробки зображень виконано успішно.")
 
 def create_new_products_import_file():
     """
-    Очищає SL_new_prod.csv (крім заголовка, який ЗБЕРІГАЄТЬСЯ) 
-    і переносить дані з SL_new.csv.
+    Створює оновлений файл `new_prod.csv` для імпорту нових товарів.
+
+    🧩 Логіка роботи:
+    1️⃣ Зчитує поточний заголовок файлу new_prod.csv (він ЗАЛИШАЄТЬСЯ без змін).
+    2️⃣ Очищує файл від старих даних.
+    3️⃣ Зчитує new.csv.
+    4️⃣ Переносить дані згідно з COLUMN_MAP.
+    5️⃣ Записує оновлені дані у new_prod.csv, залишаючи старий заголовок.
+
+    ⚠️ Якщо файлу new_prod.csv ще немає, його потрібно створити вручну з правильними заголовками.
     """
-    # --- МАПА КОЛОНОК (SL_new_csv -> SL_new_prod.csv) ---
+
+    # -----------------------------------------------------------
+    # 🔢 Мапа колонок: {індекс у new.csv → індекс у new_prod.csv}
+    # -----------------------------------------------------------
     COLUMN_MAP = {
-        15: 0, 1: 1, 2: 2, 5: 3, 6: 4, 7: 5, 8: 6, 9: 7, 16: 8, 18: 9, 
-        19: 10, 20: 11, 21: 12, 22: 13,
-        23: 14, 24: 15, 25: 16, 26: 17, 27: 18, 28: 19, 29: 20, 30: 21, 
-        31: 22, 32: 23, 33: 24, 34: 25, 35: 26, 36: 27, 37: 28, 38: 29, 
-        39: 30, 40: 31, 41: 32, 42: 33, 43: 34, 44: 35, 45: 36, 46: 37, 
-        47: 38, 48: 39, 49: 40, 51: 41
+        15: 0, 1: 1, 2: 2, 5: 3, 6: 4, 7: 5, 8: 6, 9: 7, 16: 8, 18: 9,
+        19: 10, 20: 11, 21: 12, 22: 13, 23: 14, 24: 15, 25: 16, 26: 17,
+        27: 18, 28: 19, 29: 20, 30: 21, 31: 22, 32: 23, 33: 24, 34: 25,
+        35: 26, 36: 27, 37: 28, 38: 29, 39: 30, 40: 31, 41: 32, 42: 33,
+        43: 34, 44: 35, 45: 36, 46: 37, 47: 38, 48: 39, 49: 40, 51: 41
     }
+    log_message_to_existing_file()
+    logging.info("ФУНКЦІЯ 10. Починаю формування файлу new_prod.csv для імпорту нових товарів.")
 
-    MAX_TARGET_INDEX = max(COLUMN_MAP.values())
-    MAX_SOURCE_INDEX = max(COLUMN_MAP.keys())
-
-    logging.info("Починаю створення файлу SL_new_prod.csv для імпорту нових товарів.")
-
+    # -----------------------------------------------------------
+    # 🧩 Крок 1: Завантаження налаштувань і шляхів
+    # -----------------------------------------------------------
     settings = load_settings()
     try:
         sl_new_path = settings['paths']['csv_path_supliers_1_new']
         sl_new_prod_path = settings['paths']['csv_path_sl_new_prod']
     except KeyError as e:
-        logging.critical(f"Помилка конфігурації. Не знайдено необхідний шлях у settings: {e}")
+        logging.critical(f"❌ Не знайдено шлях у settings.json: {e}")
         return
 
-    temp_prod_file_path = sl_new_prod_path + '.temp'
-    rows_to_write = []
-    processed_rows_count = 0
-    header = None # Змінна для зберігання оригінального заголовка
+    temp_file = sl_new_prod_path + '.temp'
 
-    # 1. Читання та збереження оригінального заголовка з цільового файлу
+    # -----------------------------------------------------------
+    # 📄 Крок 2: Зчитуємо існуючий заголовок new_prod.csv
+    # -----------------------------------------------------------
+    if not os.path.exists(sl_new_prod_path):
+        logging.critical(
+            f"⚠️ Файл new_prod_path не знайдено!\n"
+            "Створіть його вручну з правильними заголовками перед запуском."
+        )
+        return
+
     try:
-        if not os.path.exists(sl_new_prod_path):
-            # Якщо файл не існує, ми не знаємо, якими мають бути заголовки.
-            logging.critical(f"Файл SL_new_prod.csv не знайдено за шляхом: {sl_new_prod_path}. Вам потрібно створити цей файл з правильними заголовками ВРУЧНУ перед запуском!")
-            return
-
-        # Читаємо заголовок, якщо файл існує
-        with open(sl_new_prod_path, mode='r', encoding='utf-8') as f:
+        with open(sl_new_prod_path, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
-            header = next(reader)
-            rows_to_write.append(header) # Додаємо оригінальний заголовок до даних для запису
-            
-        logging.info(f"Знайдено та збережено оригінальний заголовок з {sl_new_prod_path}.")
-
+            header = next(reader, None)
+            if not header:
+                logging.critical(f"❌ У файлі {sl_new_prod_path} відсутній заголовок.")
+                return
+        logging.info("✅ Заголовок збережено, старі дані буде очищено.")
     except Exception as e:
-        logging.critical(f"Помилка при читанні заголовка {sl_new_prod_path}: {e}")
+        logging.error(f"Помилка при читанні заголовка: {e}", exc_info=True)
         return
 
-    # 2. Читання SL_new.csv та перенесення даних
-    try:
-        if not os.path.exists(sl_new_path):
-            logging.critical(f"Вихідний файл SL_new.csv не знайдено за шляхом: {sl_new_path}")
-            return
-
-        with open(sl_new_path, mode='r', encoding='utf-8') as input_file:
-            reader = csv.reader(input_file)
-            source_rows = list(reader)
-
-        if len(source_rows) <= 1:
-            logging.warning(f"Файл {sl_new_path} містить лише заголовок або порожній. Дані для перенесення відсутні.")
-            # Якщо даних немає, записуємо файл лише з оригінальним заголовком (rows_to_write вже містить заголовок)
-            pass 
-        else:
-            source_rows_data = source_rows[1:] # Пропускаємо заголовок
-
-            for idx, source_row in enumerate(source_rows_data, start=1):
-                
-                if len(source_row) < MAX_SOURCE_INDEX + 1:
-                    logging.warning(f"Рядок {idx}: Пропущено через недостатню довжину даних ({len(source_row)} < {MAX_SOURCE_INDEX + 1}).")
-                    continue
-
-                # Створюємо рядок для цільового файлу з довжиною, що відповідає заголовку
-                target_row = [''] * (len(header) if header else (MAX_TARGET_INDEX + 1))
-                
-                # Перенесення даних згідно з мапою
-                for source_index, target_index in COLUMN_MAP.items():
-                    # Перевірка, чи не виходить індекс за межі заголовка
-                    if target_index < len(target_row):
-                        target_row[target_index] = source_row[source_index].strip()
-                
-                rows_to_write.append(target_row)
-                processed_rows_count += 1
-                
-            logging.info(f"Обробка SL_new.csv завершена. Знайдено {processed_rows_count} рядків для запису.")
-
-    except Exception as e:
-        logging.critical(f"Критична помибка під час читання/обробки SL_new.csv: {e}", exc_info=True)
+    # -----------------------------------------------------------
+    # 📦 Крок 3: Зчитуємо SL_new.csv
+    # -----------------------------------------------------------
+    if not os.path.exists(sl_new_path):
+        logging.critical(f"❌ Файл new_path не знайдено.")
         return
 
-    # 3. Фінальний запис оновленого файлу
     try:
-        with open(temp_prod_file_path, mode='w', encoding='utf-8', newline='') as output_file:
-            writer = csv.writer(output_file)
-            writer.writerows(rows_to_write)
-        
-        os.replace(temp_prod_file_path, sl_new_prod_path)
-        logging.info(f"Файл SL_new_prod.csv успішно оновлено. Записано {processed_rows_count} рядків даних, заголовок ЗБЕРЕЖЕНО.")
-
+        with open(sl_new_path, 'r', encoding='utf-8') as f:
+            reader = list(csv.reader(f))
     except Exception as e:
-        logging.error(f"Помилка під час фінального запису SL_new_prod.csv: {e}")
-        if os.path.exists(temp_prod_file_path):
-            os.remove(temp_prod_file_path)
+        logging.critical(f"Помилка при читанні new_path: {e}", exc_info=True)
+        return
+
+    if len(reader) <= 1:
+        logging.warning("⚠️ SL_new.csv порожній або містить лише заголовок.")
+        # Записуємо лише заголовок у новий файл
+        with open(sl_new_prod_path, 'w', encoding='utf-8', newline='') as f:
+            csv.writer(f).writerow(header)
+        return
+
+    source_rows = reader[1:]  # Пропускаємо заголовок
+
+    # -----------------------------------------------------------
+    # 🔄 Крок 4: Формуємо нові рядки згідно з мапою COLUMN_MAP
+    # -----------------------------------------------------------
+    rows_to_write = [header]
+    processed = 0
+    max_src = max(COLUMN_MAP.keys())
+
+    for i, src_row in enumerate(source_rows, start=2):  # рядки починаються з 2 (1 — заголовок)
+        # Перевіряємо довжину рядка (щоб уникнути IndexError)
+        if len(src_row) <= max_src:
+            logging.warning(f"⚠️ Рядок {i}: пропущено — недостатньо колонок ({len(src_row)}/{max_src+1}).")
+            continue
+
+        # Створюємо новий рядок із такою самою кількістю колонок, як у заголовку
+        tgt_row = [''] * len(header)
+
+        # Переносимо значення згідно з COLUMN_MAP
+        for src_idx, tgt_idx in COLUMN_MAP.items():
+            if tgt_idx < len(tgt_row):
+                tgt_row[tgt_idx] = src_row[src_idx].strip()
+
+        rows_to_write.append(tgt_row)
+        processed += 1
+
+    logging.info(f"🔁 Оброблено {processed} рядків для запису у new_prod.csv.")
+
+    # -----------------------------------------------------------
+    # 💾 Крок 5: Запис у файл (очистка старих даних, але заголовок зберігається)
+    # -----------------------------------------------------------
+    try:
+        with open(temp_file, 'w', encoding='utf-8', newline='') as f:
+            csv.writer(f).writerows(rows_to_write)
+        os.replace(temp_file, sl_new_prod_path)
+        logging.info(f"✅ Файл new_prod_path оновлено ({processed} рядків).")
+    except Exception as e:
+        logging.error(f"❌ Помилка запису new_prod_path: {e}", exc_info=True)
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
 
 def update_existing_products_batch():
     """
-    Завантажує дані з SL_old_prod_new_SHK.csv та виконує пакетне оновлення 
-    існуючих товарів у WooCommerce через REST API.
-    """
-    log_message_to_existing_file()
-    logging.info("🚀 Починаю пакетне оновлення існуючих товарів з SL_old_prod_new_SHK.csv...")
+    Оновлює існуючі товари у WooCommerce на основі CSV-файлу old_prod_new_SHK.csv.
 
+    Функціонал:
+    1. Зчитує налаштування та підключається до WooCommerce API.
+    2. Читає CSV та формує список товарів для пакетного оновлення.
+    3. Для кожного товару:
+       - Перевіряє ID
+       - Збирає стандартні поля (sku, post_date, product_type, tax_status)
+       - Формує meta_data (ACF, Rank Math)
+       - Обробляє атрибути:
+            * зберігає старі атрибути, яких немає в CSV
+            * оновлює існуючі та додає нові
+            * глобальний атрибут pa_manufacturer прив'язується до WooCommerce
+       - Оновлює теги (tags)
+       - Оновлює excerpt та content
+    4. Надсилає товари пакетами по BATCH_SIZE.
+    5. Логує результат та помилки.
+    """
+
+    log_message_to_existing_file()
+    logging.info("ФУНКЦІЯ 11. Починаю пакетне оновлення існуючих товарів з old_prod_new_SHK.csv...")
+
+    # --- Завантаження налаштувань ---
     settings = load_settings()
     if not settings:
         logging.critical("❌ Не вдалося завантажити налаштування.")
         return
-    # ... (перевірка шляхів та wcapi) ...
+
     try:
         csv_path = settings['paths']['csv_path_sl_old_prod_new_shk']
-    except KeyError as e:
-        logging.error(f"❌ Помилка конфігурації. Не знайдено шлях до CSV: {e}")
+    except KeyError:
+        logging.error("❌ Не знайдено шлях до CSV у налаштуваннях.")
         return
 
+    # --- Підключення до WooCommerce API ---
     wcapi = get_wc_api(settings)
     if not wcapi:
         logging.critical("❌ Не вдалося створити об'єкт WooCommerce API.")
         return
-    
-    BATCH_SIZE = 50 
-    products_to_update: List[Dict[str, Any]] = []
+
+    # --- Параметри пакетного оновлення ---
+    BATCH_SIZE = 50
+    products_to_update = []
     total_products_read = 0
     total_updated = 0
     total_skipped = 0
-    errors_list: List[str] = []
-    
+    errors_list = []
     start_time = time.time()
-    # ----------------------------------------
-    
+
     try:
         with open(csv_path, mode='r', encoding='utf-8') as f:
             reader = csv.reader(f)
             headers = next(reader)
             logging.info(f"Зчитано {len(headers)} заголовків: {', '.join(headers[:5])}...")
 
-            STANDARD_FIELDS = ['sku', 'post_date', 'excerpt', 'content', 'product_type']
+            STANDARD_FIELDS = ['sku', 'post_date', 'product_type', 'tax_status']
             ACF_PREFIX = 'Мета: '
             ATTRIBUTE_PREFIX = 'attribute:'
-            field_map: Dict[str, int] = {header: index for index, header in enumerate(headers)}
+            field_map = {header: idx for idx, header in enumerate(headers)}
 
             for row in reader:
                 total_products_read += 1
-                
-                # ... (перевірка ID) ...
+
+                # --- Перевірка ID ---
                 product_id_str = row[field_map.get('id', -1)].strip()
-                if not product_id_str or not product_id_str.isdigit():
-                    errors_list.append(f"Рядок {total_products_read}: Пропущено. Не знайдено коректний ID товару.")
+                if not product_id_str.isdigit():
+                    errors_list.append(f"Рядок {total_products_read}: Пропущено. Некоректний ID.")
                     total_skipped += 1
                     continue
-                
-                product_data: Dict[str, Any] = {"id": int(product_id_str)}
-                meta_data: List[Dict[str, Any]] = []
-                attributes: List[Dict[str, Any]] = []
 
+                product_id = int(product_id_str)
+                product_data = {"id": product_id}
+                meta_data = []
+                new_attributes = []
+                tags = []
+
+                # --- Проходимо по всіх колонках ---
                 for key, index in field_map.items():
-                    if index >= len(row): continue
-                    value = row[index].strip()
-                    
-                    if key == 'id':
+                    if index >= len(row):
                         continue
-                    elif key == 'manage_stock':
-                        product_data[key] = (value.lower() in ['yes', 'true', '1'])
-                    elif key.startswith(ACF_PREFIX):
-                        acf_key = key.replace(ACF_PREFIX, '')
-                        meta_data.append({"key": acf_key, "value": value})
-                    elif key == 'rank_math_focus_keyword':
-                        meta_data.append({"key": key, "value": value})
-                    
-                    elif key.startswith(ATTRIBUTE_PREFIX):
-                        # --- ВИПРАВЛЕННЯ АТРИБУТІВ ---
-                        # Отримуємо slug без 'attribute:' та 'pa_'
-                        attribute_name = key.replace(ATTRIBUTE_PREFIX, '')  # 'pa_made-in'
-                        if value:
-                            options_list = [v.strip() for v in value.split(',') if v.strip()] 
-                            if options_list:
-                                attributes.append({
-                                    # ❗ не ставимо id: 0 — WooCommerce сам знайде глобальний атрибут за ім’ям
-                                    "name": attribute_name,  # має бути 'pa_made-in'
-                                    "position": len(attributes),
-                                    "visible": True,
-                                    "variation": False,
-                                    "options": options_list,
-                                })
-                            
-                    elif key == 'Позначки':
-                         if value:
-                            tag_names = [t.strip() for t in value.split(',') if t.strip()]
-                            product_data['tags'] = [{"name": name} for name in tag_names]
-                    
-                    # --- ВИПРАВЛЕННЯ СТАНДАРТНИХ ПОЛІВ ---
-                    elif key in STANDARD_FIELDS or key == 'tax_status':
-                        if key == 'content':
-                            product_data['description'] = value
-                        elif key == 'excerpt':
-                            product_data['short_description'] = value
-                        elif key == 'post_date':
-                            if value:
-                                # WooCommerce приймає ISO 8601, тому можемо передати напряму
-                                product_data['date_created'] = value
-                                # Якщо хочеш бути максимально коректним – можна одразу задати GMT-версію
-                                try:
-                                    dt = datetime.fromisoformat(value)
-                                    product_data['date_created_gmt'] = (dt - timedelta(hours=3)).isoformat()
-                                except ValueError:
-                                    errors_list.append(f"⚠️ Рядок {total_products_read}: некоректний формат post_date '{value}'")
+                    value = row[index].strip()
+                    if not value:
+                        continue
+
+                    # --- Стандартні поля ---
+                    if key in STANDARD_FIELDS:
+                        if key == 'post_date':
+                            product_data['date_created'] = value
+                            try:
+                                dt = datetime.fromisoformat(value)
+                                product_data['date_created_gmt'] = (dt - timedelta(hours=3)).isoformat()
+                            except ValueError:
+                                errors_list.append(
+                                    f"⚠️ Рядок {total_products_read}: некоректний формат post_date '{value}'"
+                                )
                         else:
                             product_data[key] = value
-                    # ------------------------------------
 
+                    # --- Meta Data ---
+                    elif key.startswith(ACF_PREFIX) or key == 'rank_math_focus_keyword':
+                        meta_key = key.replace(ACF_PREFIX, '') if key.startswith(ACF_PREFIX) else key
+                        meta_data.append({"key": meta_key, "value": value})
+
+                    # --- Теги ---
+                    elif key == 'Позначки':
+                        tag_names = [t.strip() for t in value.split(',') if t.strip()]
+                        tags.extend([{"name": t} for t in tag_names])
+
+                    # --- Не додаю Короткий та повний опис ---
+                    # elif key == 'excerpt':
+                    #    product_data['excerpt'] = value
+                    # elif key == 'content':
+                    #    product_data['description'] = value  # WooCommerce API
+
+                    # --- Атрибути ---
+                    elif key.startswith(ATTRIBUTE_PREFIX):
+                        attr_name = key.replace(ATTRIBUTE_PREFIX, '')
+                        options = [v.strip() for v in value.split(',') if v.strip()]
+                        if options:
+                            attr_dict = {
+                                "name": attr_name,
+                                "position": len(new_attributes),
+                                "visible": True,
+                                "variation": False,
+                                "options": options
+                            }
+                            # Глобальний атрибут manufacturer
+                            if attr_name == "pa_manufacturer":
+                                attr_dict["id"] = 1  # ID глобального атрибута manufacturer у WooCommerce
+                            new_attributes.append(attr_dict)
+
+                # --- Додаємо meta_data та теги до product_data ---
                 if meta_data:
-                    product_data['meta_data'] = meta_data 
-                if attributes:
-                    product_data['attributes'] = attributes
-                
+                    product_data['meta_data'] = meta_data
+                if tags:
+                    product_data['tags'] = tags
+
+                # --- Обробка атрибутів: merge з існуючими ---
+                if new_attributes:
+                    try:
+                        # Отримуємо існуючі атрибути товару
+                        existing_attributes = wcapi.get(f"products/{product_id}").json().get("attributes", [])
+                        attr_map = {attr['name']: attr for attr in existing_attributes}
+
+                        # Оновлюємо існуючі або додаємо нові
+                        for new_attr in new_attributes:
+                            name = new_attr['name']
+                            if name in attr_map:
+                                attr_map[name]['options'] = new_attr['options']
+                                attr_map[name]['position'] = new_attr['position']
+                                attr_map[name]['visible'] = new_attr['visible']
+                                attr_map[name]['variation'] = new_attr['variation']
+                                if 'id' in new_attr:
+                                    attr_map[name]['id'] = new_attr['id']
+                            else:
+                                attr_map[name] = new_attr
+
+                        product_data['attributes'] = list(attr_map.values())
+                    except Exception as e:
+                        logging.error(f"Рядок {total_products_read}: Помилка merge атрибутів: {e}")
+
                 products_to_update.append(product_data)
 
+                # --- Надсилання пакету на оновлення ---
                 if len(products_to_update) >= BATCH_SIZE:
                     total_updated += _process_batch_update(wcapi, products_to_update, errors_list)
-                    products_to_update = [] 
-            
+                    products_to_update = []
+
+            # --- Обробка залишку ---
             if products_to_update:
                 total_updated += _process_batch_update(wcapi, products_to_update, errors_list)
-            
+
     except Exception as e:
-        logging.critical(f"❌ Критична помилка під час читання/обробки CSV: {e}", exc_info=True)
+        logging.critical(f"❌ Критична помилка при обробці CSV: {e}", exc_info=True)
         return
 
-    # ... (Підсумок) ...
-    end_time = time.time()
-    elapsed_time = int(end_time - start_time)
-    
+    # --- Підсумок ---
+    elapsed_time = int(time.time() - start_time)
     logging.info("--- 🏁 Підсумок оновлення існуючих товарів ---")
-    logging.info(f"Всього прочитано рядків: {total_products_read}")
-    logging.info(f"Успішно оновлено (або надіслано на оновлення) товарів: {total_updated}")
+    logging.info(f"Всього рядків: {total_products_read}")
+    logging.info(f"Успішно оновлено: {total_updated}")
     logging.info(f"Пропущено/з помилками: {total_products_read - total_updated}")
     logging.info(f"Загальна тривалість: {elapsed_time} сек.")
-    
+
     if errors_list:
-        logging.warning(f"⚠️ Знайдено {len(errors_list)} помилок/пропусків. Перші 5 помилок:")
-        for error in errors_list[:5]:
-            logging.warning(f"-> {error}")
+        logging.warning(f"⚠️ Знайдено {len(errors_list)} помилок. Перші 5:")
+        for err in errors_list[:5]:
+            logging.warning(f"-> {err}")
     else:
-        logging.info("✅ Оновлення завершено без помилок API/пропусків.")
+        logging.info("✅ Оновлення завершено без помилок.")
 
 def create_new_products_batch():
-    """
-    Завантажує дані з SL_new_prod.csv та виконує пакетне СТВОРЕННЯ 
-    нових товарів у WooCommerce через REST API.
-    """
+    """Пакетне створення нових товарів у WooCommerce з CSV."""
     log_message_to_existing_file()
     logging.info("🚀 Починаю пакетне СТВОРЕННЯ нових товарів з SL_new_prod.csv...")
 
@@ -1775,165 +1422,141 @@ def create_new_products_batch():
 
     try:
         csv_path = settings['paths']['csv_path_sl_new_prod']
+        uploads_path = '/var/www/html/erosinua/public_html/wp-content/uploads/products'
     except KeyError as e:
-        logging.error(f"❌ Помилка конфігурації. Не знайдено шлях до CSV: {e}")
+        logging.error(f"❌ Не знайдено шлях до CSV або uploads_path: {e}")
         return
 
     wcapi = get_wc_api(settings)
     if not wcapi:
         logging.critical("❌ Не вдалося створити об'єкт WooCommerce API.")
         return
-    
-    BATCH_SIZE = 50 
+
+    BATCH_SIZE = 50
     products_to_create: List[Dict[str, Any]] = []
     total_products_read = 0
     total_created = 0
     total_skipped = 0
     errors_list: List[str] = []
-    
     start_time = time.time()
-    
-    logging.info("Покладаємося на API для перевірки дублікатів SKU під час створення...")
 
-    # --- Константи ---
     STANDARD_FIELDS = ['sku', 'post_date', 'excerpt', 'content', 'product_type']
     ACF_PREFIX = 'Мета: '
     ATTRIBUTE_PREFIX = 'attribute:'
-    # ------------------
 
     try:
         with open(csv_path, mode='r', encoding='utf-8') as f:
             reader = csv.reader(f)
             headers = next(reader)
-            field_map: Dict[str, int] = {header: index for index, header in enumerate(headers)}
-            
+            field_map = {header: idx for idx, header in enumerate(headers)}
+
             for row in reader:
                 total_products_read += 1
-                
                 sku = row[field_map.get('sku', -1)].strip()
                 name = row[field_map.get('name', -1)].strip()
+
                 if not sku or not name:
                     errors_list.append(f"Рядок {total_products_read}: Пропущено. Відсутній SKU або Name.")
                     total_skipped += 1
                     continue
-                
-                product_data: Dict[str, Any] = {"sku": sku, "name": name, "status": "publish"}
+
+                product_data: Dict[str, Any] = {"sku": sku, "name": name, "status": "draft"}
                 meta_data: List[Dict[str, Any]] = []
                 attributes: List[Dict[str, Any]] = []
+                tags: List[Dict[str, Any]] = []
                 images: List[Dict[str, Any]] = []
 
-                # --- Формування полів ---
                 for key, index in field_map.items():
-                    if index >= len(row): continue
-                    value = row[index].strip()
-                    
-                    if key == 'sku' or key == 'name':
+                    if index >= len(row):
                         continue
-                    elif key == 'product_type':
-                         product_data['type'] = value or 'simple'
-                    elif key == 'status':
-                         product_data['status'] = value or 'publish'
-                    elif key == 'manage_stock':
-                        product_data[key] = (value.lower() in ['yes', 'true', '1'])
-                    elif key == 'regular_price':
-                        product_data[key] = value
+                    value = row[index].strip()
+                    if not value:
+                        continue
+
+                    # --- стандартні поля ---
+                    if key in STANDARD_FIELDS:
+                        if key == 'product_type':
+                            product_data['type'] = value or 'simple'
+                        elif key == 'excerpt':
+                            product_data['short_description'] = value
+                        elif key == 'content':
+                            product_data['description'] = value
+                        elif key == 'post_date':
+                            product_data['date_created'] = value
+                    # --- meta_data ---
                     elif key.startswith(ACF_PREFIX):
-                        acf_key = key.replace(ACF_PREFIX, '')
-                        meta_data.append({"key": acf_key, "value": value})
+                        meta_data.append({"key": key.replace(ACF_PREFIX, ''), "value": value})
                     elif key == 'rank_math_focus_keyword':
                         meta_data.append({"key": key, "value": value})
-                    
-                    # --- АТРИБУТИ ---
+                    # --- атрибути ---
                     elif key.startswith(ATTRIBUTE_PREFIX):
-                        attribute_name = key.replace(ATTRIBUTE_PREFIX, '')  # 'pa_made-in'
-                        if value:
-                            # Розділяємо значення атрибутів комою (це стандартна практика)
-                            options_list = [v.strip() for v in value.split(',') if v.strip()] 
-                            if options_list:
-                                attributes.append({
-                                    "name": attribute_name, 
-                                    "position": len(attributes),
-                                    "visible": True,
-                                    "variation": False,
-                                    "options": options_list,
-                                })
-
-                    # --- КАТЕГОРІЇ (ВИПРАВЛЕНО: ВИКОРИСТАННЯ '|') ---
+                        attr_name = key.replace(ATTRIBUTE_PREFIX, '')
+                        options = [v.strip() for v in value.split(',') if v.strip()]
+                        if options:
+                            attr = {"name": attr_name, "position": len(attributes), "visible": True,
+                                    "variation": False, "options": options}
+                            if attr_name == "pa_manufacturer":
+                                attr["id"] = 1
+                            attributes.append(attr)
+                    # --- категорії ---
                     elif key == 'categories':
-                        if value:
-                            # ! ВИКОРИСТАННЯ '|' ДЛЯ НАДІЙНОГО РОЗДІЛЕННЯ КАТЕГОРІЙ
-                            category_names = [c.strip() for c in value.split('|') if c.strip()]
-                            # API очікує об'єкти з 'name' або 'id'
-                            product_data['categories'] = [{"name": name} for name in category_names]
-                            
+                        category_names = [c.strip() for c in value.split('|') if c.strip()]
+                        if category_names:
+                            product_data['categories'] = [{"name": c} for c in category_names]
+                    # --- теги ---
                     elif key == 'Позначки':
-                         if value:
-                            tag_names = [t.strip() for t in value.split(',') if t.strip()]
-                            product_data['tags'] = [{"name": name} for name in tag_names]
-                    
-                    # --- ЗОБРАЖЕННЯ ---
+                        tags.extend([{"name": t.strip()} for t in value.split(',') if t.strip()])
+                    # --- зображення ---
                     elif key == 'image_name':
-                        if value:
-                            image_files = [f.strip() for f in value.split(',') if f.strip()]
-                            
-                            for filename in image_files:
-                                media_id = _get_media_id_by_filename(wcapi, filename)
-                                
-                                if media_id:
-                                    images.append({"id": media_id})
-                                else:
-                                    errors_list.append(f"⚠️ SKU {sku}: Зображення '{filename}' не знайдено в медіатеці.")
-                            
-                            if images:
-                                product_data['images'] = images
-
-                    # --- ІНШІ СТАНДАРТНІ ПОЛЯ ---
-                    elif key == 'content':
-                        product_data['description'] = value
-                    elif key == 'excerpt':
-                        product_data['short_description'] = value
-                    elif key == 'post_date':
-                        if value:
-                            try:
-                                # Встановлюємо дату створення
-                                product_data['date_created'] = value
-                            except Exception:
-                                errors_list.append(f"⚠️ SKU {sku}: Некоректний формат post_date.")
+                        images = find_media_ids_for_sku(wcapi, sku, uploads_path)
+                    # --- ціна, запаси, оподаткування, статус ---
+                    elif key == 'regular_price':
+                        product_data['regular_price'] = str(value)
+                    elif key == 'manage_stock':
+                        product_data['manage_stock'] = value.strip() in ['1', 'yes', 'true']
+                    elif key == 'tax_status':
+                        product_data['tax_status'] = 'taxable' if value.strip() in ['1', 'yes', 'true'] else 'none'
+                    elif key == 'status':
+                        product_data['status'] = 'publish' if value.strip() in ['1', 'yes', 'true'] else 'draft'
                     else:
                         product_data[key] = value
 
-                # Додаємо сформовані списки до основного тіла
+                # --- додавання списків у product_data ---
                 if meta_data:
-                    product_data['meta_data'] = meta_data 
+                    product_data['meta_data'] = meta_data
                 if attributes:
                     product_data['attributes'] = attributes
-                
+                if tags:
+                    product_data['tags'] = tags
+                if images:
+                    product_data['images'] = images
+
                 products_to_create.append(product_data)
 
+                # --- пакетна відправка ---
                 if len(products_to_create) >= BATCH_SIZE:
                     total_created += _process_batch_create(wcapi, products_to_create, errors_list)
-                    products_to_create = [] 
-            
+                    products_to_create = []
+
+            # --- обробка залишку ---
             if products_to_create:
                 total_created += _process_batch_create(wcapi, products_to_create, errors_list)
-            
+
     except FileNotFoundError:
         logging.critical(f"❌ Файл {csv_path} не знайдено.")
         return
     except Exception as e:
-        logging.critical(f"❌ Критична помилка під час читання/обробки CSV: {e}", exc_info=True)
+        logging.critical(f"❌ Критична помилка при читанні CSV: {e}", exc_info=True)
         return
 
-    # 3. Підсумок
-    end_time = time.time()
-    elapsed_time = int(end_time - start_time)
-    
+    # --- підсумок ---
+    elapsed_time = int(time.time() - start_time)
     logging.info("--- 🏁 Підсумок створення нових товарів ---")
     logging.info(f"Всього прочитано рядків: {total_products_read}")
-    logging.info(f"Успішно СТВОРЕНО товарів: {total_created}")
+    logging.info(f"Успішно створено товарів: {total_created}")
     logging.info(f"Пропущено/з помилками: {total_products_read - total_created}")
     logging.info(f"Загальна тривалість: {elapsed_time} сек.")
-    
+
     if errors_list:
         logging.warning(f"⚠️ Знайдено {len(errors_list)} помилок/пропусків. Перші 5 помилок:")
         for error in errors_list[:5]:

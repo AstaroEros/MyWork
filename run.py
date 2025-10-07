@@ -1,5 +1,5 @@
 import argparse
-from scr.base_function import check_version, check_csv_data
+from scr.base_function import check_version, check_csv_data, export_product_by_id
 from scr.products import export_products, download_supplier_price_list, process_supplier_1_price_list, \
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
@@ -163,6 +163,15 @@ def main():
         help='Завантажити дані з SL_new_prod.csv і створити нові товари у базі.'
     )
 
+    parser.add_argument("--export-product-by-id", 
+        action="store_true", 
+        help="Експорт усіх даних товару за ID у CSV"
+    )
+
+
+
+
+
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -263,6 +272,11 @@ def main():
     elif args.create_new_products:
         print("✨ Починаю пакетне створення нових товарів...")
         create_new_products_batch()
+
+    elif args.export_product_by_id:
+        print("✨ Запуск функції для парсингу всіх данних товару по його ID...")
+        export_product_by_id()
+
 
     else:
         # Якщо аргументи не вказано, вивести довідку
