@@ -1512,10 +1512,51 @@ def create_new_products_batch():
                     # --- атрибути ---
                     elif key.startswith(ATTRIBUTE_PREFIX):
                         attr_name = key.replace(ATTRIBUTE_PREFIX, '')
-                        options = [v.strip() for v in value.split(',') if v.strip()]
+
+                        # Розумне розділення опцій: перевага для ', ' (кома + пробіл),
+                        # потім ';' або '|' як роздільники, і як останній варіант —
+                        # розбити по ',' та з'єднати сусідні числові фрагменти (['15','0'] -> '15,0').
+                        import re
+
+                        def _smart_split_attr(val: str) -> list:
+                            if not val:
+                                return []
+                            # 1) split on comma+space (зазвичай для списків: "a, b, c" або файлів "file1, file2")
+                            parts = [p.strip() for p in re.split(r',\s+', val) if p.strip()]
+                            if len(parts) > 1:
+                                return parts
+                            # 2) try semicolon or pipe
+                            if ';' in val:
+                                return [p.strip() for p in val.split(';') if p.strip()]
+                            if '|' in val:
+                                return [p.strip() for p in val.split('|') if p.strip()]
+                            # 3) fallback: split on comma and rejoin numeric neighbour fragments (15,0)
+                            if ',' in val:
+                                temp = [p.strip() for p in val.split(',') if p.strip()]
+                                reconstructed = []
+                                i = 0
+                                while i < len(temp):
+                                    if i + 1 < len(temp) and re.fullmatch(r'\d+', temp[i]) and re.fullmatch(r'\d+', temp[i+1]):
+                                        # Об'єднуємо сусідні цифрові фрагменти назад в десяткове з комою
+                                        reconstructed.append(temp[i] + ',' + temp[i+1])
+                                        i += 2
+                                    else:
+                                        reconstructed.append(temp[i])
+                                        i += 1
+                                return reconstructed
+                            # default — одне значення
+                            return [val.strip()]
+
+                        options = _smart_split_attr(value)
+
                         if options:
-                            attr = {"name": attr_name, "position": len(attributes), "visible": True,
-                                    "variation": False, "options": options}
+                            attr = {
+                                "name": attr_name,
+                                "position": len(attributes),
+                                "visible": True,
+                                "variation": False,
+                                "options": options
+                            }
                             if attr_name == "pa_manufacturer":
                                 attr["id"] = 1
                             attributes.append(attr)

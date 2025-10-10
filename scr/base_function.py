@@ -897,3 +897,327 @@ def export_product_by_id():
 
     except Exception as e:
         logging.error(f"❌ Помилка під час експорту: {e}", exc_info=True)
+
+
+
+
+
+def update_image_seo_by_sku():
+    """
+    Оновлює SEO-атрибути зображень товару за SKU.
+    - Оновлює alt/title через WooCommerce (wc/v3 products PUT).
+    - Оновлює caption/description через WP REST API (wp/v2/media/{id}) з Basic Auth,
+      використовуючи credentials з settings.json: 'login' і 'pass'.
+    """
+    logging.basicConfig(level=logging.INFO)
+    print("🖼️ Запускаю оновлення SEO-атрибутів зображень...")
+
+    settings = load_settings()
+    if not settings:
+        logging.critical("❌ Не вдалося завантажити налаштування.")
+        return
+
+    # --- Параметри для WooCommerce API (wc/v3) ---
+    try:
+        wcapi = get_wc_api(settings)
+    except Exception as e:
+        logging.critical(f"❌ Не вдалося створити об'єкт WooCommerce API: {e}")
+        return
+
+    base_url = settings.get("url", "").rstrip("/")
+    api_key = settings.get("consumer_key")
+    api_secret = settings.get("consumer_secret")
+
+    wp_login = settings.get("login")   # username або логін
+    wp_pass = settings.get("pass")     # application password або пароль
+
+    if not base_url or not api_key or not api_secret:
+        logging.critical("❌ Неповні налаштування API (url, consumer_key або consumer_secret).")
+        return
+
+    # 1) Введення SKU
+    sku = input("🔍 Введіть SKU товару: ").strip()
+    if not sku:
+        print("❌ SKU не введено.")
+        return
+
+    # 2) Отримуємо товар по SKU
+    try:
+        resp = wcapi.get("products", params={"sku": sku})
+        if resp.status_code != 200:
+            logging.error(f"❌ WooCommerce products GET returned {resp.status_code}: {resp.text[:200]}")
+            print(f"❌ Помилка при пошуку товару (статус {resp.status_code}). Перевір логи.")
+            return
+        products = resp.json()
+        if not products:
+            print(f"❌ Товар зі SKU {sku} не знайдено.")
+            return
+        product = products[0]
+    except Exception as e:
+        logging.error(f"Помилка при запиті до WooCommerce: {e}", exc_info=True)
+        print("❌ Помилка при з'єднанні з WooCommerce.")
+        return
+
+    product_name = product.get("name", "").strip()
+    product_id = product.get("id")
+    image_list: List[Dict[str, Any]] = product.get("images", [])  # список dict з keys: id, src, name, alt
+
+    if not product_name:
+        print("❌ Не знайдено назви товару.")
+        return
+
+    if not image_list:
+        print(f"❌ Товар {product_name} не має прив'язаних зображень у відповіді WC API.")
+        return
+
+    print(f"✅ Знайдено товар: {product_name}")
+    print(f"🖼️ Знайдено {len(image_list)} прив'язаних зображень. Починаю оновлення...")
+
+    seo_data = {
+        "title": product_name,
+        "alt": f"Купити товар {product_name} в секс-шопі Eros.in.ua",
+        "caption": f"{product_name} – інноваційна секс-іграшка для вашого задоволення",
+        "description": f"{product_name} купити в інтернет-магазині Eros.in.ua. Великий вибір секс-іграшок, низька ціна, швидка безкоштовна доставка."
+    }
+
+    # --- Допоміжна функція: знайти media id по filename через WP REST API (search) ---
+    def find_media_id_by_filename(filename: str) -> int:
+        """
+        Повертає media id або None. Працює через /wp-json/wp/v2/media?search=<filename>
+        Потрібна аутентифікація, якщо WP закритий. Ми спробуємо без auth першим, потім з auth.
+        """
+        search_url = f"{base_url}/wp-json/wp/v2/media"
+        params = {"search": filename, "per_page": 10}
+        headers = {"Accept": "application/json"}
+
+        # Спроба без auth
+        try:
+            r = requests.get(search_url, params=params, headers=headers, timeout=15, verify=True)
+            if r.status_code == 200:
+                items = r.json()
+                for it in items:
+                    src = it.get("source_url", "") or it.get("guid", {}).get("rendered", "")
+                    if filename.lower() in (os.path.basename(src).lower()):
+                        return it.get("id")
+            # якщо не вдалось або порожньо — спробуємо з auth якщо є
+        except Exception as e:
+            logging.debug(f"find_media_id_by_filename (no auth) error: {e}")
+
+        if wp_login and wp_pass:
+            try:
+                r = requests.get(search_url, params=params, headers=headers, auth=(wp_login, wp_pass), timeout=15, verify=True)
+                if r.status_code == 200:
+                    items = r.json()
+                    for it in items:
+                        src = it.get("source_url", "") or it.get("guid", {}).get("rendered", "")
+                        if filename.lower() in (os.path.basename(src).lower()):
+                            return it.get("id")
+                else:
+                    logging.debug(f"find_media_id_by_filename (auth) status {r.status_code}: {r.text[:200]}")
+            except Exception as e:
+                logging.debug(f"find_media_id_by_filename (auth) exception: {e}")
+
+        return None
+
+    # --- Основний цикл оновлення ---
+    updated = 0
+    failed = 0
+
+    # We'll batch update product images alt/title via product PUT if possible
+    # Prepare a copy of current images with alt changes to minimize number of product PUTs.
+    wc_images_update = []
+    for img in image_list:
+        media_id = img.get("id")
+        src = img.get("src") or ""
+        filename = os.path.basename(src) if src else None
+
+        # Prefer media_id; if missing, try to find by filename
+        if not media_id and filename:
+            found_id = find_media_id_by_filename(filename)
+            if found_id:
+                media_id = found_id
+                logging.info(f"Знайдено media_id {media_id} по файлу {filename}")
+            else:
+                logging.warning(f"Не знайдено media record для {filename}. Пропускаю.")
+                continue
+
+        if media_id:
+            # For WooCommerce product update we will set alt and name (title)
+            wc_images_update.append({"id": media_id, "alt": seo_data["alt"], "name": seo_data["title"]})
+
+    # If we have any image updates for WooCommerce — send one PUT to products/{id}
+    if wc_images_update and product_id:
+        try:
+            resp_put = wcapi.put(f"products/{product_id}", {"images": wc_images_update})
+            if resp_put.status_code == 200:
+                logging.info("✅ WooCommerce: alt/title оновлено через products PUT")
+                updated += len(wc_images_update)
+            else:
+                logging.error(f"❌ WooCommerce products PUT returned {resp_put.status_code}: {resp_put.text[:300]}")
+                # don't return — try per-media WP updates below
+        except Exception as e:
+            logging.error(f"Помилка при WooCommerce products PUT: {e}")
+
+    # Now, attempt to update caption/description via wp/v2/media for each image
+    for img in image_list:
+        media_id = img.get("id")
+        src = img.get("src") or ""
+        filename = os.path.basename(src) if src else None
+
+        if not media_id:
+            if filename:
+                media_id = find_media_id_by_filename(filename)
+                if media_id:
+                    logging.info(f"Знайдено media_id {media_id} для {filename} через пошук.")
+                else:
+                    logging.warning(f"Не вдалося знайти media_id для {filename}. Пропускаю WP media update.")
+                    failed += 1
+                    continue
+            else:
+                logging.warning("Зображення не має src та id — пропускаю.")
+                failed += 1
+                continue
+
+        media_endpoint = f"{base_url}/wp-json/wp/v2/media/{media_id}"
+        update_data = {
+            "title": seo_data["title"],
+            "alt_text": seo_data["alt"],
+            "caption": seo_data["caption"],
+            "description": seo_data["description"]
+        }
+
+        # Треба авторизація для wp/v2/media (Application Password або user/pass)
+        if not wp_login or not wp_pass:
+            logging.warning("⚠️ В settings.json не знайдені 'login' та 'pass' — пропускаю оновлення caption/description через wp/v2/media.")
+            failed += 1
+            continue
+
+        try:
+            r = requests.put(media_endpoint, auth=(wp_login, wp_pass), json=update_data, timeout=20, verify=True)
+            if r.status_code == 200:
+                print(f"✅ Оновлено медіа ID {media_id} ({filename if filename else ''})")
+                updated += 1
+            else:
+                logging.error(f"❌ Помилка оновлення ID {media_id}. Статус: {r.status_code}. Помилка: {r.text[:300]}")
+                failed += 1
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Критична помилка запиту для {media_id}: {e}")
+            failed += 1
+
+    print(f"🎯 Завершено. Успішно оновлено: {updated}, не вдалося: {failed}.")
+
+
+
+
+def translate_texts_deepl_batch(texts, target_lang="RU", api_key=None, api_url=None):
+    """
+    Перекладає список текстів через DeepL API одним запитом.
+    Повертає список перекладених текстів.
+    """
+    if not api_key:
+        logging.error("API ключ DeepL не вказано!")
+        return texts
+
+    if not api_url:
+        api_url = "https://api-free.deepl.com/v2/translate"
+
+    try:
+        response = requests.post(
+            api_url,
+            data={
+                "auth_key": api_key,
+                "text": texts,
+                "target_lang": target_lang
+            },
+            timeout=30
+        )
+        response.raise_for_status()
+        data = response.json()
+        return [t["text"] for t in data["translations"]]
+    except Exception as e:
+        logging.error(f"Помилка пакетного перекладу через DeepL: {e}")
+        return texts
+
+def translate_csv_to_ru(batch_size=20):
+    """
+    Перекладає ключові колонки CSV з української на російську через DeepL.
+    Використовує шляхи та ключі з settings.json.
+    Працює пакетами, щоб уникнути блокування API.
+    """
+    log_message_to_existing_file()
+    logging.info("🚀 Початок перекладу CSV на російську...")
+
+    settings = load_settings()
+    if not settings:
+        logging.error("❌ Неможливо завантажити settings.json")
+        return
+
+    input_path = settings["paths"].get("csv_path_sl_new_prod")
+    output_path = settings["paths"].get("csv_path_sl_new_prod_ru")
+    api_key = settings.get("deepl_api_key")
+    api_url = settings.get("DEEPL_API_URL", "https://api-free.deepl.com/v2/translate")
+
+    if not all([input_path, output_path, api_key]):
+        logging.error("❌ В settings.json не вказані всі необхідні параметри (шляхи або deepl_api_key)")
+        return
+
+    # Твої реальні колонки для перекладу
+    columns_to_translate = ["name", "content", "excerpt", "rank_math_focus_keyword"]
+
+    try:
+        with open(input_path, mode='r', encoding='utf-8') as f_in, \
+             open(output_path, mode='w', encoding='utf-8', newline='') as f_out:
+
+            reader = csv.DictReader(f_in)
+            headers = reader.fieldnames
+            if not headers:
+                logging.error("❌ Файл порожній або немає заголовків.")
+                return
+
+            writer = csv.DictWriter(f_out, fieldnames=headers)
+            writer.writeheader()
+
+            batch_rows = []
+            batch_texts = []
+
+            for idx, row in enumerate(reader, start=2):
+                texts_to_translate = []
+                for col in columns_to_translate:
+                    texts_to_translate.append(row.get(col, ""))
+
+                batch_rows.append(row)
+                batch_texts.append(texts_to_translate)
+
+                # Переклад пакетом
+                if len(batch_rows) >= batch_size:
+                    # Транспонуємо список текстів для DeepL (потрібно надсилати рядки окремо)
+                    flattened_texts = [t for sublist in batch_texts for t in sublist]
+                    translated_flat = translate_texts_deepl_batch(flattened_texts, api_key=api_key, api_url=api_url)
+
+                    # Розпаковуємо назад у рядки
+                    for i, r in enumerate(batch_rows):
+                        for j, col in enumerate(columns_to_translate):
+                            r[col] = translated_flat[i * len(columns_to_translate) + j]
+                            logging.info(f"Рядок {idx - len(batch_rows) + i + 2}: колонка '{col}' перекладена.")
+                        writer.writerow(r)
+
+                    batch_rows = []
+                    batch_texts = []
+                    time.sleep(1)  # пауза між пакетами
+
+            # Переклад залишку рядків
+            if batch_rows:
+                flattened_texts = [t for sublist in batch_texts for t in sublist]
+                translated_flat = translate_texts_deepl_batch(flattened_texts, api_key=api_key, api_url=api_url)
+                for i, r in enumerate(batch_rows):
+                    for j, col in enumerate(columns_to_translate):
+                        r[col] = translated_flat[i * len(columns_to_translate) + j]
+                        logging.info(f"Рядок {idx - len(batch_rows) + i + 2}: колонка '{col}' перекладена.")
+                    writer.writerow(r)
+
+        logging.info(f"✅ Переклад завершено. Файл збережено: {output_path}")
+
+    except FileNotFoundError:
+        logging.error(f"❌ Вхідний файл не знайдено: {input_path}")
+    except Exception as e:
+        logging.error(f"❌ Непередбачена помилка при перекладі CSV: {e}")

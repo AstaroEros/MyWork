@@ -1,5 +1,5 @@
 import argparse
-from scr.base_function import check_version, check_csv_data, export_product_by_id
+from scr.base_function import check_version, check_csv_data, export_product_by_id, update_image_seo_by_sku, translate_csv_to_ru
 from scr.products import export_products, download_supplier_price_list, process_supplier_1_price_list, \
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
@@ -169,7 +169,17 @@ def main():
     )
 
 
+    parser.add_argument(
+        "--update-image-seo",
+        action="store_true",
+        help="Оновити SEO-атрибути зображень за SKU."
+    )
 
+    parser.add_argument(
+        "--translate-ru",
+        action="store_true",
+        help="Перекласти CSV SL_new_prod.csv на російську через DeepL"
+    )
 
 
     # 3. Парсинг аргументів
@@ -276,6 +286,16 @@ def main():
     elif args.export_product_by_id:
         print("✨ Запуск функції для парсингу всіх данних товару по його ID...")
         export_product_by_id()
+
+
+    elif args.update_image_seo:
+        print("🖼️ Запускаю оновлення SEO-атрибутів зображень...")
+        update_image_seo_by_sku()
+
+    elif args.translate_ru:
+        print("🌐 Запускаю переклад CSV new_prod.csv на російську через DeepL...")
+        translate_csv_to_ru()
+
 
 
     else:
