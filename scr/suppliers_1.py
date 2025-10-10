@@ -1260,7 +1260,7 @@ def update_existing_products_batch():
         return
 
     # --- Параметри пакетного оновлення ---
-    BATCH_SIZE = 50
+    BATCH_SIZE = 5
     products_to_update = []
     total_products_read = 0
     total_updated = 0
@@ -1273,7 +1273,11 @@ def update_existing_products_batch():
             reader = csv.reader(f)
             headers = next(reader)
             logging.info(f"Зчитано {len(headers)} заголовків: {', '.join(headers[:5])}...")
+            logging.info(f"⏳ Відправка пакету з {len(products_to_update)} товарів...")
+            payload = {"update": products_to_update}
+            response = wcapi.post("products/batch", data=payload)
 
+            start_batch = time.time()
             STANDARD_FIELDS = ['sku', 'post_date', 'product_type', 'tax_status']
             ACF_PREFIX = 'Мета: '
             ATTRIBUTE_PREFIX = 'attribute:'
@@ -1384,13 +1388,25 @@ def update_existing_products_batch():
 
                 # --- Надсилання пакету на оновлення ---
                 if len(products_to_update) >= BATCH_SIZE:
+                    current_batch = (total_products_read // BATCH_SIZE)
+                    logging.info(
+                        f"⏳ Відправка пакету {current_batch} — "
+                        f"{len(products_to_update)} товарів "
+                        f"(всього оновлено: {total_updated} з {total_products_read})"
+                    )
+
                     total_updated += _process_batch_update(wcapi, products_to_update, errors_list)
                     products_to_update = []
-
+            logging.info(f"✅ Відповідь отримано за {int(time.time() - start_batch)} сек.")
             # --- Обробка залишку ---
             if products_to_update:
+                current_batch = (total_products_read // BATCH_SIZE) + 1
+                logging.info(
+                    f"⏳ Відправка фінального пакету {current_batch} — "
+                    f"{len(products_to_update)} товарів "
+                    f"(всього оновлено: {total_updated} з {total_products_read})"
+                )
                 total_updated += _process_batch_update(wcapi, products_to_update, errors_list)
-
     except Exception as e:
         logging.critical(f"❌ Критична помилка при обробці CSV: {e}", exc_info=True)
         return

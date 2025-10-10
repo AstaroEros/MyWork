@@ -41,7 +41,7 @@ def get_wc_api(settings):
         consumer_key=settings["consumer_key"],
         consumer_secret=settings["consumer_secret"],
         version="wc/v3",
-        timeout=30,
+        timeout=120,
         query_string_auth=True
     )
     return wcapi
