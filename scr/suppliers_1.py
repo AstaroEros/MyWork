@@ -691,7 +691,7 @@ def fill_product_category():
 
                 # --- Фіксовані колонки ---
                 row[V] = name_ukr
-                row[W] = "0"
+                row[W] = "draft"
                 row[X] = "yes"
                 row[Y] = "none"
                 row[AZ] = "simple"
@@ -1058,6 +1058,7 @@ def download_images_for_product():
     # 1️⃣ Очистка
     clear_directory(jpg_path)
     clear_directory(webp_path)
+    logging.info("1. ✅ Очистка папок JPG та WEBP завершена.")
 
     # 2️⃣ Завантаження
     rows = []
@@ -1077,19 +1078,23 @@ def download_images_for_product():
 
     with open(sl_new, 'w', encoding='utf-8', newline='') as f:
         csv.writer(f).writerows(rows)
-    logging.info(f"📥 Завантаження зображень завершено ({len(rows)-1} рядків).")
+    logging.info(f"2. 📥 Завантаження зображень завершено ({len(rows)-1} рядків).")
 
     # 3️⃣ GIF
     move_gifs(jpg_path, webp_path)
+    logging.info("3. ✅ Переміщення GIF завершено.")
 
     # 4️⃣ WEBP
     convert_to_webp_square(jpg_path, webp_path)
+    logging.info("4. ✅ Конвертація JPG у WEBP завершена.")
 
     # 5️⃣ CSV sync
     sync_webp_column(sl_new, webp_path, WEBP_LIST, SKU)
+    logging.info("5. ✅ Оновлення колонки WEBP у CSV завершено.")
 
     # 6️⃣ Копіювання
     copy_to_site(webp_path, site_path)
+    logging.info("6. ✅ Копіювання зображень на сайт завершено.")
 
     logging.info("✅ Усі 6 етапів обробки зображень виконано успішно.")
 

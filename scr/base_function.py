@@ -515,26 +515,57 @@ def move_gifs(src: str, dest: str) -> int:
     return moved
 
 def convert_to_webp_square(src: str, dest: str) -> int:
-    """Конвертує JPG/PNG → WEBP і вирівнює до квадрату."""
+    """
+    Конвертує JPG/PNG → WEBP, вирівнює зображення до квадрату
+    та коректно обробляє прозорість (RGBA / палітрові P-зображення).
+    """
+    import os
+    import logging
+    from PIL import Image
+
     converted = 0
+
     for root, _, files in os.walk(src):
         rel = os.path.relpath(root, src)
         out_dir = os.path.join(dest, rel)
         os.makedirs(out_dir, exist_ok=True)
+
         for f in files:
             if not f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
                 continue
+
             try:
-                img = Image.open(os.path.join(root, f))
+                img_path = os.path.join(root, f)
+                img = Image.open(img_path)
+
+                # 🔹 Конвертація кольорового режиму (для уникнення warning)
+                if img.mode == "P":
+                    img = img.convert("RGBA")
+                elif img.mode not in ("RGB", "RGBA"):
+                    img = img.convert("RGB")
+
                 w, h = img.size
                 max_side = max(w, h)
-                canvas = Image.new("RGB", (max_side, max_side), "white")
-                canvas.paste(img, ((max_side - w)//2, (max_side - h)//2))
+
+                # 🔹 Якщо зображення має альфа-канал — створюємо прозоре полотно
+                if img.mode == "RGBA":
+                    canvas = Image.new("RGBA", (max_side, max_side), (255, 255, 255, 0))
+                else:
+                    canvas = Image.new("RGB", (max_side, max_side), (255, 255, 255))
+
+                # Центрування
+                canvas.paste(img, ((max_side - w) // 2, (max_side - h) // 2))
+
+                # 🔹 Збереження у форматі WEBP
                 new_name = os.path.splitext(f)[0] + '.webp'
-                canvas.save(os.path.join(out_dir, new_name), 'webp', quality=90)
+                out_path = os.path.join(out_dir, new_name)
+                canvas.save(out_path, 'webp', quality=90)
+
                 converted += 1
+
             except Exception as e:
                 logging.error(f"❌ WEBP-конвертація '{f}' не вдалася: {e}")
+
     logging.info(f"🟢 WEBP-конвертовано {converted} зображень.")
     return converted
 
@@ -567,6 +598,10 @@ def download_product_images(url: str, sku: str, category: str, base_path: str, c
             files.append(fname)
         except Exception:
             continue
+
+    # 🟢 Логування результату
+    logging.info(f"📸 Завантажено {len(files)} зображень для SKU {sku}: {', '.join(files)}")
+
     return files
 
 def sync_webp_column(sl_path: str, webp_path: str, col_index: int, sku_index: int) -> int:

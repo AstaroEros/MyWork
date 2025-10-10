@@ -104,7 +104,7 @@ def main():
     parser.add_argument(
         "--standardize-final",
         action="store_true",
-        help="Застосувати фінальні правила заміни з attribute.csv до SL_new.csv."
+        help="Застосувати фінальні правила заміни з attribute.csv до new.csv."
     )
 
     # ✨ НОВИЙ АРГУМЕНТ для заповнення категорій
@@ -125,21 +125,21 @@ def main():
     parser.add_argument( # <--- ДОДАНО
     "--separate-existing",
     action="store_true",
-    help="Звірити SL_new.csv з базою (zalishki.csv) за штрихкодом, перенести існуючі товари у SL_old_prod_new_SHK.csv та видалити їх з SL_new.csv."
+    help="Звірити SL_new.csv з базою (zalishki.csv) за штрихкодом, перенести існуючі товари у old_prod_new_SHK.csv та видалити їх з SL_new.csv."
     )
 
     # ✨ НОВИЙ АРГУМЕНТ для присвоєння нових SKU
     parser.add_argument(
     "--assign-sku",
     action="store_true",
-    help="Знайти найбільший SKU у zalishki.csv та присвоїти послідовні SKU новим товарам у SL_new.csv (колонка P/15)."
+    help="Знайти найбільший SKU у zalishki.csv та присвоїти послідовні SKU новим товарам у new.csv (колонка P/15)."
     )
 
 # ✨ НОВИЙ АРГУМЕНТ для комплексного завантаження зображень
     parser.add_argument(
     "--download-images",
     action="store_true",
-    help="Комплексний процес: Завантаження зображень з URL (B/1) у папки категорій (Q/16), перейменування за SKU (P/15), оновлення SL_new.csv (R/17) та сортування GIF-файлів."
+    help="Комплексний процес: Завантаження зображень з URL (B/1) у папки категорій (Q/16), перейменування за SKU (P/15), оновлення new.csv (R/17) та сортування GIF-файлів."
     )
 
 
@@ -147,7 +147,7 @@ def main():
     parser.add_argument(
     "--create-import-file",
     action="store_true",
-    help="Створює файл SL_new_prod.csv для імпорту нових товарів, очищуючи його та переносячи дані з SL_new.csv."
+    help="Створює файл SL_new_prod.csv для імпорту нових товарів, очищуючи його та переносячи дані з new.csv."
     )
 
 
