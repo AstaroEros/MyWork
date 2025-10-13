@@ -6,7 +6,7 @@ from scr.products import export_products, download_supplier_price_list, process_
 from scr.suppliers_1 import find_new_products, find_product_data, parse_product_attributes, apply_final_standardization, \
                         fill_product_category, refill_product_category, separate_existing_products, assign_new_sku_to_products, \
                         download_images_for_product, create_new_products_import_file, update_existing_products_batch, \
-                        create_new_products_batch
+                        create_new_products_batch, update_image_seo_from_csv, translate_and_prepare_new_prod_csv
 
 
 def main():
@@ -181,6 +181,18 @@ def main():
         help="Перекласти CSV SL_new_prod.csv на російську через DeepL"
     )
 
+    parser.add_argument(
+        "--update-image-seo-from-csv",
+        action="store_true",
+        help="Оновлює SEO-атрибути зображень товарів з CSV (csv_path_sl_new_prod) використовуючи seo_tag."
+    )
+
+    
+    parser.add_argument(
+        "--translate-new-prod",
+        action="store_true",
+        help="Перекласти name, content та short_description нового CSV і підготувати для завантаження на сайт."
+    )
 
     # 3. Парсинг аргументів
     args = parser.parse_args()
@@ -296,7 +308,13 @@ def main():
         print("🌐 Запускаю переклад CSV new_prod.csv на російську через DeepL...")
         translate_csv_to_ru()
 
+    elif args.update_image_seo:
+        print("🖼️ Починаю оновлення SEO-атрибутів зображень для всіх SKU з CSV...")
+        update_image_seo_from_csv()
 
+    elif args.translate_new_prod:
+        print("🔄 Запускаю переклад нового CSV та підготовку для завантаження...")
+        translate_and_prepare_new_prod_csv()
 
     else:
         # Якщо аргументи не вказано, вивести довідку

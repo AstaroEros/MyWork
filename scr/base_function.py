@@ -1109,40 +1109,63 @@ def update_image_seo_by_sku():
 
 
 
-def translate_texts_deepl_batch(texts, target_lang="RU", api_key=None, api_url=None):
+def clean_text(text):
     """
-    Перекладає список текстів через DeepL API одним запитом.
-    Повертає список перекладених текстів.
+    Видаляє HTML теги та зайві пробіли.
     """
+    if not text:
+        return ""
+    text = re.sub(r'<[^>]+>', '', text)  # видалити HTML теги
+    text = re.sub(r'\s+', ' ', text).strip()  # зайві пробіли та переводи рядків
+    return text
+
+def translate_text_deepl(text, target_lang="RU", api_key=None, api_url=None):
+    """
+    Переклад тексту через DeepL API.
+    Розбиває на абзаци по 500 символів, щоб Free API не повертав оригінал.
+    """
+    if not text.strip():
+        return text
     if not api_key:
         logging.error("API ключ DeepL не вказано!")
-        return texts
-
+        return text
     if not api_url:
         api_url = "https://api-free.deepl.com/v2/translate"
 
-    try:
-        response = requests.post(
-            api_url,
-            data={
-                "auth_key": api_key,
-                "text": texts,
-                "target_lang": target_lang
-            },
-            timeout=30
-        )
-        response.raise_for_status()
-        data = response.json()
-        return [t["text"] for t in data["translations"]]
-    except Exception as e:
-        logging.error(f"Помилка пакетного перекладу через DeepL: {e}")
-        return texts
+    # Розбиваємо на шматки <= 500 символів
+    chunks = []
+    current = ""
+    for paragraph in text.split(". "):
+        if len(current) + len(paragraph) + 2 <= 500:
+            current += (". " if current else "") + paragraph
+        else:
+            if current:
+                chunks.append(current)
+            current = paragraph
+    if current:
+        chunks.append(current)
 
-def translate_csv_to_ru(batch_size=20):
+    translated_chunks = []
+    for chunk in chunks:
+        try:
+            response = requests.post(
+                api_url,
+                data={"auth_key": api_key, "text": chunk, "target_lang": target_lang},
+                timeout=30
+            )
+            response.raise_for_status()
+            translated_chunks.append(response.json()["translations"][0]["text"])
+            time.sleep(0.5)  # пауза між запитами
+        except Exception as e:
+            logging.error(f"Помилка перекладу: {e}")
+            translated_chunks.append(chunk)  # повертаємо оригінал у разі помилки
+
+    return " ".join(translated_chunks)
+
+def translate_csv_to_ru():
     """
-    Перекладає ключові колонки CSV з української на російську через DeepL.
-    Використовує шляхи та ключі з settings.json.
-    Працює пакетами, щоб уникнути блокування API.
+    Перекладає content та excerpt з української на російську
+    та зберігає у SL_new_prod_ru.csv
     """
     log_message_to_existing_file()
     logging.info("🚀 Початок перекладу CSV на російську...")
@@ -1158,66 +1181,48 @@ def translate_csv_to_ru(batch_size=20):
     api_url = settings.get("DEEPL_API_URL", "https://api-free.deepl.com/v2/translate")
 
     if not all([input_path, output_path, api_key]):
-        logging.error("❌ В settings.json не вказані всі необхідні параметри (шляхи або deepl_api_key)")
+        logging.error("❌ Не вказані всі параметри у settings.json")
         return
 
-    # Твої реальні колонки для перекладу
-    columns_to_translate = ["name", "content", "excerpt", "rank_math_focus_keyword"]
-
     try:
-        with open(input_path, mode='r', encoding='utf-8') as f_in, \
-             open(output_path, mode='w', encoding='utf-8', newline='') as f_out:
+        with open(input_path, 'r', encoding='utf-8') as f_in, \
+             open(output_path, 'w', encoding='utf-8', newline='') as f_out:
 
             reader = csv.DictReader(f_in)
-            headers = reader.fieldnames
-            if not headers:
-                logging.error("❌ Файл порожній або немає заголовків.")
-                return
-
-            writer = csv.DictWriter(f_out, fieldnames=headers)
+            output_headers = ["sku", "name", "content", "short_description", "rank_math_focus_keyword", "lang", "translation_of"]
+            writer = csv.DictWriter(f_out, fieldnames=output_headers)
             writer.writeheader()
 
-            batch_rows = []
-            batch_texts = []
-
             for idx, row in enumerate(reader, start=2):
-                texts_to_translate = []
-                for col in columns_to_translate:
-                    texts_to_translate.append(row.get(col, ""))
+                new_row = {}
 
-                batch_rows.append(row)
-                batch_texts.append(texts_to_translate)
+                # 1. SKU
+                new_row["sku"] = row.get("sku", "")
 
-                # Переклад пакетом
-                if len(batch_rows) >= batch_size:
-                    # Транспонуємо список текстів для DeepL (потрібно надсилати рядки окремо)
-                    flattened_texts = [t for sublist in batch_texts for t in sublist]
-                    translated_flat = translate_texts_deepl_batch(flattened_texts, api_key=api_key, api_url=api_url)
+                # 2. Name без перекладу
+                new_row["name"] = row.get("name", "")
 
-                    # Розпаковуємо назад у рядки
-                    for i, r in enumerate(batch_rows):
-                        for j, col in enumerate(columns_to_translate):
-                            r[col] = translated_flat[i * len(columns_to_translate) + j]
-                            logging.info(f"Рядок {idx - len(batch_rows) + i + 2}: колонка '{col}' перекладена.")
-                        writer.writerow(r)
+                # 3. Переклад content
+                content_text = clean_text(row.get("content", ""))
+                new_row["content"] = translate_text_deepl(content_text, target_lang="RU", api_key=api_key, api_url=api_url)
 
-                    batch_rows = []
-                    batch_texts = []
-                    time.sleep(1)  # пауза між пакетами
+                # 4. Переклад excerpt → short_description
+                excerpt_text = clean_text(row.get("excerpt", ""))
+                new_row["short_description"] = translate_text_deepl(excerpt_text, target_lang="RU", api_key=api_key, api_url=api_url)
 
-            # Переклад залишку рядків
-            if batch_rows:
-                flattened_texts = [t for sublist in batch_texts for t in sublist]
-                translated_flat = translate_texts_deepl_batch(flattened_texts, api_key=api_key, api_url=api_url)
-                for i, r in enumerate(batch_rows):
-                    for j, col in enumerate(columns_to_translate):
-                        r[col] = translated_flat[i * len(columns_to_translate) + j]
-                        logging.info(f"Рядок {idx - len(batch_rows) + i + 2}: колонка '{col}' перекладена.")
-                    writer.writerow(r)
+                # 5. Rank Math
+                new_row["rank_math_focus_keyword"] = row.get("rank_math_focus_keyword", "")
+
+                # 6. WPML
+                new_row["lang"] = "ru"
+                new_row["translation_of"] = ""  # можна підставити ID оригіналу
+
+                writer.writerow(new_row)
+                logging.info(f"Рядок {idx}: переклад content та short_description завершено")
 
         logging.info(f"✅ Переклад завершено. Файл збережено: {output_path}")
 
     except FileNotFoundError:
         logging.error(f"❌ Вхідний файл не знайдено: {input_path}")
     except Exception as e:
-        logging.error(f"❌ Непередбачена помилка при перекладі CSV: {e}")
+        logging.error(f"❌ Помилка при перекладі CSV: {e}")

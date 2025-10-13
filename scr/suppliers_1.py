@@ -14,7 +14,8 @@ from typing import Dict, Tuple, List, Optional, Any
 from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log_message_to_existing_file, load_attributes_csv, \
                                 save_attributes_csv, load_category_csv, save_category_csv, load_poznachky_csv, \
                                 _process_batch_update, find_media_ids_for_sku, _process_batch_create, clear_directory, \
-                                download_product_images, move_gifs, convert_to_webp_square, sync_webp_column, copy_to_site
+                                download_product_images, move_gifs, convert_to_webp_square, sync_webp_column, copy_to_site, \
+                                translate_text_deepl
 from datetime import datetime, timedelta
 
 
@@ -1625,3 +1626,228 @@ def create_new_products_batch():
             logging.warning(f"-> {error}")
     else:
         logging.info("✅ Створення нових товарів завершено успішно.")
+
+
+def update_image_seo_from_csv():
+    """
+    Оновлює SEO-атрибути зображень всіх товарів, що знаходяться у csv_path_sl_new_prod.
+    Використовує шаблон тегів з seo_tag та WooCommerce + WP REST API для оновлення.
+    """
+    import os, csv, logging, requests
+    from scr.base_function import load_settings, get_wc_api
+    from typing import List, Dict, Any
+
+    logging.basicConfig(level=logging.INFO)
+    print("🖼️ Починаю оновлення SEO-атрибутів для товарів із CSV...")
+
+    settings = load_settings()
+    if not settings:
+        logging.critical("❌ Не вдалося завантажити налаштування.")
+        return
+
+    csv_path = settings["paths"].get("csv_path_sl_new_prod")
+    seo_tag_path = settings["paths"].get("seo_tag")
+    if not csv_path or not seo_tag_path:
+        logging.critical("❌ Не вказані шляхи до CSV або файлу тегів у settings.json.")
+        return
+
+    # --- Завантажуємо шаблон тегів ---
+    seo_tags_map = {}
+    try:
+        with open(seo_tag_path, mode='r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                category = row['category'].strip()
+                seo_tags_map[category] = row
+    except Exception as e:
+        logging.critical(f"❌ Не вдалося завантажити файл SEO тегів: {e}")
+        return
+
+    # --- Отримуємо список SKU з CSV ---
+    skus: List[Dict[str, str]] = []
+    try:
+        with open(csv_path, mode='r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                sku = row.get('sku') or row.get('SKU')
+                category = row.get('categories') or row.get('Категорія')
+                name = row.get('name') or row.get('Назва')
+                if sku:
+                    skus.append({"sku": sku.strip(), "category": category.strip() if category else "", "name": name.strip() if name else ""})
+    except Exception as e:
+        logging.critical(f"❌ Не вдалося прочитати CSV: {e}")
+        return
+
+    # --- Підключення до WooCommerce ---
+    try:
+        wcapi = get_wc_api(settings)
+    except Exception as e:
+        logging.critical(f"❌ Не вдалося створити об'єкт WooCommerce API: {e}")
+        return
+
+    base_url = settings.get("url", "").rstrip("/")
+    wp_login = settings.get("login")
+    wp_pass = settings.get("pass")
+
+    updated_count = 0
+    failed_count = 0
+
+    for item in skus:
+        sku = item["sku"]
+        product_name = item["name"]
+        category = item["category"]
+
+        # Визначаємо SEO-дані по категорії
+        seo_row = seo_tags_map.get(category)
+        if seo_row:
+            alt = seo_row.get("alt_ukr", "").replace("{product_name}", product_name)
+            caption = seo_row.get("caption_ukr", "").replace("{product_name}", product_name)
+            description = seo_row.get("desc_ukr", "").replace("{product_name}", product_name)
+            title = seo_row.get("name_ukr", "").replace("{product_name}", product_name)
+        else:
+            alt = f"Купити товар {product_name} в секс-шопі Eros.in.ua"
+            caption = f"{product_name} – інноваційна секс-іграшка"
+            description = f"{product_name} купити в інтернет-магазині Eros.in.ua."
+            title = product_name
+
+        try:
+            resp = wcapi.get("products", params={"sku": sku})
+            if resp.status_code != 200 or not resp.json():
+                logging.warning(f"❌ Товар зі SKU {sku} не знайдено або помилка GET.")
+                failed_count += 1
+                continue
+            product = resp.json()[0]
+        except Exception as e:
+            logging.error(f"❌ Помилка WooCommerce GET для SKU {sku}: {e}")
+            failed_count += 1
+            continue
+
+        product_id = product.get("id")
+        images: List[Dict[str, Any]] = product.get("images", [])
+
+        wc_images_update = []
+        for img in images:
+            img_id = img.get("id")
+            src = img.get("src")
+            if not img_id and src and wp_login and wp_pass:
+                # Спроба знайти через WP REST API по filename
+                filename = os.path.basename(src)
+                media_search = requests.get(f"{base_url}/wp-json/wp/v2/media", params={"search": filename}, auth=(wp_login, wp_pass))
+                if media_search.status_code == 200 and media_search.json():
+                    img_id = media_search.json()[0].get("id")
+
+            if img_id:
+                wc_images_update.append({"id": img_id, "alt": alt, "name": title})
+
+                # Оновлення caption/description через WP REST API
+                if wp_login and wp_pass:
+                    try:
+                        media_endpoint = f"{base_url}/wp-json/wp/v2/media/{img_id}"
+                        requests.put(media_endpoint, auth=(wp_login, wp_pass),
+                                     json={"title": title, "alt_text": alt, "caption": caption, "description": description})
+                    except Exception as e:
+                        logging.warning(f"❌ Не вдалося оновити WP media для img_id {img_id}: {e}")
+
+        if wc_images_update and product_id:
+            try:
+                resp_put = wcapi.put(f"products/{product_id}", {"images": wc_images_update})
+                if resp_put.status_code == 200:
+                    updated_count += len(wc_images_update)
+                else:
+                    logging.warning(f"❌ WooCommerce PUT для SKU {sku} не успішний: {resp_put.status_code}")
+                    failed_count += len(wc_images_update)
+            except Exception as e:
+                logging.error(f"❌ WooCommerce PUT exception для SKU {sku}: {e}")
+                failed_count += len(wc_images_update)
+
+    print(f"🎯 Оновлення завершено. Успішно оновлено: {updated_count}, не вдалося: {failed_count}.")
+
+
+def translate_and_prepare_new_prod_csv():
+    """
+    Оновлює CSV для нового товару:
+    - переклад name → Title, content → Content, short_description → Excerpt
+    - rank_math_focus_keyword копіюється
+    - categories копіюється з оригінального CSV
+    - інші колонки підтягуються з існуючого перекладеного файлу або залишаються порожніми
+    """
+    log_message_to_existing_file()
+    logging.info("🚀 Початок підготовки нового CSV для завантаження...")
+
+    settings = load_settings()
+    input_path = settings["paths"].get("csv_path_sl_new_prod")
+    output_path = settings["paths"].get("csv_path_sl_new_prod_ru")
+    api_key = settings.get("deepl_api_key")
+    api_url = settings.get("DEEPL_API_URL", "https://api-free.deepl.com/v2/translate")
+
+    if not all([input_path, output_path, api_key]):
+        logging.error("❌ Не вказані всі параметри у settings.json")
+        return
+
+    # --- Зчитаємо існуючий переклад (для підтягання інших колонок) ---
+    existing_translations = {}
+    try:
+        with open(output_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                sku = row.get("Sku") or row.get("sku")
+                if sku:
+                    existing_translations[sku] = row
+    except FileNotFoundError:
+        logging.warning(f"Файл перекладів не знайдено: {output_path}. Створимо новий.")
+
+    try:
+        with open(input_path, 'r', encoding='utf-8') as f_in, \
+             open(output_path, 'w', encoding='utf-8', newline='') as f_out:
+
+            reader = csv.DictReader(f_in)
+            output_headers = [
+                "Sku","Title","Content","Excerpt","Date","categories","Post Type","Permalink","WPML Translation ID",
+                "WPML Language Code","Parent Product ID","_wpml_import_language_code","_wpml_import_source_language_code",
+                "_wpml_import_translation_group","Price","Regular Price","Sale Price","Stock Status","Stock",
+                "External Product URL","Total Sales","Product Type","Shipping Class","Product Visibility",
+                "Image URL","Image Filename","Image Path","Image ID","Image Title","Image Caption","Image Description",
+                "Image Alt Text","Image Featured","Бренди","Категорії товарів","Product Tags","Translation Priorities",
+                "rank_math_internal_links_processed","_low_stock_amount","rank_math_focus_keyword"
+            ]
+            writer = csv.DictWriter(f_out, fieldnames=output_headers)
+            writer.writeheader()  # очищаємо файл і пишемо заголовки
+
+            for idx, row in enumerate(reader, start=2):
+                sku = row.get("sku")
+                if not sku:
+                    logging.warning(f"Рядок {idx}: пропущено через відсутній SKU")
+                    continue
+
+                new_row = {col: "" for col in output_headers}  # очищаємо всі колонки
+                new_row["Sku"] = sku
+
+                # --- Вставка перекладу ---
+                new_row["Title"] = translate_text_deepl(row.get("name", "").strip(), "RU", api_key, api_url)
+                new_row["Content"] = translate_text_deepl(row.get("content", "").strip(), "RU", api_key, api_url)
+                new_row["Excerpt"] = translate_text_deepl(row.get("short_description", "").strip(), "RU", api_key, api_url)
+
+                # rank_math_focus_keyword копіюємо
+                new_row["rank_math_focus_keyword"] = row.get("rank_math_focus_keyword", "")
+
+                # categories копіюємо з оригінального CSV
+                new_row["categories"] = row.get("categories", "")
+
+                # lang та translation_of через існуючий переклад
+                wpml_row = existing_translations.get(sku, {})
+                new_row["WPML Language Code"] = "ru"
+                new_row["WPML Translation ID"] = wpml_row.get("WPML Translation ID", "")
+
+                # --- Підтягуємо інші колонки з існуючого перекладу ---
+                for key, value in wpml_row.items():
+                    if key not in ["Sku","Title","Content","Excerpt","rank_math_focus_keyword","WPML Language Code","WPML Translation ID"]:
+                        if key in output_headers:
+                            new_row[key] = value
+
+                writer.writerow(new_row)
+                logging.info(f"Рядок {idx}: SKU {sku} підготовлено для завантаження")
+
+        logging.info(f"✅ Підготовка CSV завершена. Файл готовий для завантаження: {output_path}")
+
+    except Exception as e:
+        logging.error(f"❌ Помилка під час підготовки CSV: {e}")
