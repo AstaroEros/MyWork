@@ -15,7 +15,7 @@ from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log
                                 save_attributes_csv, load_category_csv, save_category_csv, load_poznachky_csv, \
                                 _process_batch_update, find_media_ids_for_sku, _process_batch_create, clear_directory, \
                                 download_product_images, move_gifs, convert_to_webp_square, sync_webp_column, copy_to_site, \
-                                translate_text_deepl
+                                translate_text_deepl, get_deepl_usage
 from datetime import datetime, timedelta
 
 
@@ -1627,7 +1627,6 @@ def create_new_products_batch():
     else:
         logging.info("✅ Створення нових товарів завершено успішно.")
 
-
 def update_image_seo_from_csv():
     """
     Оновлює SEO-атрибути зображень всіх товарів, що знаходяться у csv_path_sl_new_prod.
@@ -1765,14 +1764,14 @@ def update_image_seo_from_csv():
 
 def translate_and_prepare_new_prod_csv():
     """
-    Оновлює CSV для нового товару:
-    - переклад name → Title, content → Content, short_description → Excerpt
-    - rank_math_focus_keyword копіюється
-    - categories копіюється з оригінального CSV
-    - інші колонки підтягуються з існуючого перекладеного файлу або залишаються порожніми
+    Створює новий RU CSV на основі UA:
+    - переклад name → Title, content → Content, excerpt → Excerpt
+    - rank_math_focus_keyword та categories копіюються
+    - WPML Translation ID підтягнуто зі старого перекладу
+    - решта полів заповнюються з існуючого RU CSV або залишаються порожніми
     """
     log_message_to_existing_file()
-    logging.info("🚀 Початок підготовки нового CSV для завантаження...")
+    logging.info("🚀 Початок формування нового RU CSV...")
 
     settings = load_settings()
     input_path = settings["paths"].get("csv_path_sl_new_prod")
@@ -1784,7 +1783,10 @@ def translate_and_prepare_new_prod_csv():
         logging.error("❌ Не вказані всі параметри у settings.json")
         return
 
-    # --- Зчитаємо існуючий переклад (для підтягання інших колонок) ---
+    # 🔸 Перевіряємо залишок символів перед початком
+    get_deepl_usage(api_key)
+
+    # --- Зчитування існуючих RU перекладів ---
     existing_translations = {}
     try:
         with open(output_path, 'r', encoding='utf-8') as f:
@@ -1793,9 +1795,11 @@ def translate_and_prepare_new_prod_csv():
                 sku = row.get("Sku") or row.get("sku")
                 if sku:
                     existing_translations[sku] = row
+        logging.info(f"Завантажено існуючі переклади: {len(existing_translations)}")
     except FileNotFoundError:
         logging.warning(f"Файл перекладів не знайдено: {output_path}. Створимо новий.")
 
+    # --- Основна логіка ---
     try:
         with open(input_path, 'r', encoding='utf-8') as f_in, \
              open(output_path, 'w', encoding='utf-8', newline='') as f_out:
@@ -1811,43 +1815,43 @@ def translate_and_prepare_new_prod_csv():
                 "rank_math_internal_links_processed","_low_stock_amount","rank_math_focus_keyword"
             ]
             writer = csv.DictWriter(f_out, fieldnames=output_headers)
-            writer.writeheader()  # очищаємо файл і пишемо заголовки
+            writer.writeheader()
 
             for idx, row in enumerate(reader, start=2):
                 sku = row.get("sku")
                 if not sku:
-                    logging.warning(f"Рядок {idx}: пропущено через відсутній SKU")
+                    logging.warning(f"Рядок {idx}: пропущено (немає SKU)")
                     continue
 
-                new_row = {col: "" for col in output_headers}  # очищаємо всі колонки
+                new_row = {col: "" for col in output_headers}
                 new_row["Sku"] = sku
 
-                # --- Вставка перекладу ---
+                # 🔹 Переклади
                 new_row["Title"] = translate_text_deepl(row.get("name", "").strip(), "RU", api_key, api_url)
                 new_row["Content"] = translate_text_deepl(row.get("content", "").strip(), "RU", api_key, api_url)
-                new_row["Excerpt"] = translate_text_deepl(row.get("short_description", "").strip(), "RU", api_key, api_url)
+                new_row["Excerpt"] = translate_text_deepl(row.get("excerpt", "").strip(), "RU", api_key, api_url)
 
-                # rank_math_focus_keyword копіюємо
+                # 🔹 Копіювання без перекладу
                 new_row["rank_math_focus_keyword"] = row.get("rank_math_focus_keyword", "")
-
-                # categories копіюємо з оригінального CSV
                 new_row["categories"] = row.get("categories", "")
 
-                # lang та translation_of через існуючий переклад
-                wpml_row = existing_translations.get(sku, {})
+                # 🔹 WPML
+                ru_row = existing_translations.get(sku, {})
                 new_row["WPML Language Code"] = "ru"
-                new_row["WPML Translation ID"] = wpml_row.get("WPML Translation ID", "")
+                new_row["WPML Translation ID"] = ru_row.get("WPML Translation ID", "")
 
-                # --- Підтягуємо інші колонки з існуючого перекладу ---
-                for key, value in wpml_row.items():
-                    if key not in ["Sku","Title","Content","Excerpt","rank_math_focus_keyword","WPML Language Code","WPML Translation ID"]:
-                        if key in output_headers:
-                            new_row[key] = value
+                # 🔹 Підтягуємо решту полів
+                for key, value in ru_row.items():
+                    if key in output_headers and key not in ["Sku","Title","Content","Excerpt","categories","rank_math_focus_keyword","WPML Language Code","WPML Translation ID"]:
+                        new_row[key] = value
 
                 writer.writerow(new_row)
-                logging.info(f"Рядок {idx}: SKU {sku} підготовлено для завантаження")
+                logging.info(f"✅ Рядок {idx}: SKU {sku} перекладено")
 
-        logging.info(f"✅ Підготовка CSV завершена. Файл готовий для завантаження: {output_path}")
+        logging.info(f"🎯 Готово! Файл збережено: {output_path}")
+
+        # 🔸 Перевіряємо залишок символів після завершення
+        get_deepl_usage(api_key)
 
     except Exception as e:
-        logging.error(f"❌ Помилка під час підготовки CSV: {e}")
+        logging.error(f"❌ Помилка під час формування CSV: {e}")

@@ -1119,6 +1119,24 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text).strip()  # зайві пробіли та переводи рядків
     return text
 
+def get_deepl_usage(api_key, api_url="https://api-free.deepl.com/v2/usage"):
+    """
+    Перевіряє використання символів DeepL API (Free або Pro).
+    Повертає словник з used_characters, limit, remaining.
+    """
+    try:
+        response = requests.get(api_url, headers={"Authorization": f"DeepL-Auth-Key {api_key}"}, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        used = data.get("character_count", 0)
+        limit = data.get("character_limit", 0)
+        remaining = limit - used if limit else None
+        logging.info(f"🔹 Використано {used:,} із {limit:,} символів DeepL (залишилось {remaining:,})")
+        return {"used": used, "limit": limit, "remaining": remaining}
+    except Exception as e:
+        logging.warning(f"⚠️ Не вдалося отримати інформацію про ліміт DeepL: {e}")
+        return None
+
 def translate_text_deepl(text, target_lang="RU", api_key=None, api_url=None):
     """
     Переклад тексту через DeepL API.
