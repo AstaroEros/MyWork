@@ -6,7 +6,8 @@ from scr.products import export_products, download_supplier_price_list, process_
 from scr.suppliers_1 import find_new_products, find_product_data, parse_product_attributes, apply_final_standardization, \
                         fill_product_category, refill_product_category, separate_existing_products, assign_new_sku_to_products, \
                         download_images_for_product, create_new_products_import_file, update_existing_products_batch, \
-                        create_new_products_batch, update_image_seo_from_csv, translate_and_prepare_new_prod_csv
+                        create_new_products_batch, update_image_seo_from_csv, translate_and_prepare_new_prod_csv, \
+                        upload_ru_translation_to_wp, fill_wpml_translation_group
 
 
 def main():
@@ -194,6 +195,23 @@ def main():
         help="Перекласти name, content та short_description нового CSV і підготувати для завантаження на сайт."
     )
 
+
+    parser.add_argument(
+        "--upload-ru-translations",
+        action="store_true",
+        help="Завантажити RU переклад товарів на сайт через WooCommerce + WPML."
+    )
+
+
+# ✨ НОВИЙ АРГУМЕНТ для завантаження перекладів WPML
+    parser.add_argument(
+        "--fill-wpml-translation-group",
+        action="store_true", # Використовуємо прапорець, бо шлях у settings.json
+        help="Завантажити російські переклади з CSV-файлу, шлях до якого вказано у settings.json (paths.csv_path_sl_new_prod_ru)."
+    )
+
+
+
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -315,6 +333,16 @@ def main():
     elif args.translate_new_prod:
         print("🔄 Запускаю переклад нового CSV та підготовку для завантаження...")
         translate_and_prepare_new_prod_csv()
+
+
+    elif args.upload_ru_translations:
+        print("🌍 Завантажую RU переклади товарів на сайт...")
+        upload_ru_translation_to_wp()
+    
+    
+    elif args.fill_wpml_translation_group:
+        print("🌐 Починаю завантаження російських перекладів...")
+        fill_wpml_translation_group() # Викликаємо функцію без аргументів, бо вона бере шлях з settings.json
 
     else:
         # Якщо аргументи не вказано, вивести довідку

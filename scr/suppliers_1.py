@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 import random 
 from PIL import Image
 import logging
+import mysql.connector
 from typing import Dict, Tuple, List, Optional, Any
 from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log_message_to_existing_file, load_attributes_csv, \
                                 save_attributes_csv, load_category_csv, save_category_csv, load_poznachky_csv, \
@@ -1855,3 +1856,202 @@ def translate_and_prepare_new_prod_csv():
 
     except Exception as e:
         logging.error(f"❌ Помилка під час формування CSV: {e}")
+
+def fill_wpml_translation_group():
+    """
+    Шукає trid (_wpml_import_translation_group) у базі WordPress
+    за SKU і оновлює цей самий CSV-файл (без створення копії).
+    """
+    log_message_to_existing_file()
+    logging.info("🚀 Початок оновлення колонки _wpml_import_translation_group")
+
+    settings = load_settings()
+    csv_path = settings["paths"].get("csv_path_sl_new_prod_ru")
+    db_conf = settings.get("db")
+
+    # 🔹 Перевірка конфігурації
+    if not db_conf:
+        logging.error("❌ У settings.json відсутній розділ 'db' з параметрами бази даних")
+        return
+
+    # 🔹 Підключення до MySQL
+    conn = mysql.connector.connect(
+        host=db_conf["host"],
+        user=db_conf["user"],
+        password=db_conf["password"],
+        database=db_conf["database"],
+        charset="utf8mb4"
+    )
+    cursor = conn.cursor(dictionary=True)
+
+    # 🔹 Зчитуємо усі рядки з файлу
+    with open(csv_path, "r", encoding="utf-8") as infile:
+        reader = csv.DictReader(infile)
+        rows = list(reader)
+        fieldnames = reader.fieldnames
+        if "_wpml_import_translation_group" not in fieldnames:
+            fieldnames.append("_wpml_import_translation_group")
+
+    logging.info("🚀 Початок пошуку trid для кожного SKU...")
+
+    # 🔹 Обробка кожного SKU
+    for idx, row in enumerate(rows, start=2):
+        sku = row.get("Sku")
+        if not sku:
+            logging.warning(f"Рядок {idx}: пропущено через відсутній SKU")
+            continue
+
+        # Знайти product_id за SKU
+        cursor.execute("""
+            SELECT pm.post_id
+            FROM wp_postmeta pm
+            JOIN wp_posts p ON p.ID = pm.post_id
+            WHERE pm.meta_key = '_sku' AND pm.meta_value = %s AND p.post_type = 'product'
+            LIMIT 1;
+        """, (sku,))
+        res = cursor.fetchone()
+
+        if not res:
+            logging.warning(f"⚠️ SKU {sku}: товар не знайдено у базі")
+            continue
+
+        product_id = res["post_id"]
+
+        # Знайти trid
+        cursor.execute("""
+            SELECT trid
+            FROM wp_icl_translations
+            WHERE element_type = 'post_product' AND element_id = %s
+            LIMIT 1;
+        """, (product_id,))
+        trid_res = cursor.fetchone()
+
+        if trid_res:
+            trid = trid_res["trid"]
+            row["_wpml_import_translation_group"] = trid
+            logging.info(f"✅ SKU {sku}: знайдено trid = {trid}")
+        else:
+            logging.warning(f"⚠️ SKU {sku}: не знайдено trid у wp_icl_translations")
+
+    # 🔹 Записуємо назад у той самий файл
+    with open(csv_path, "w", encoding="utf-8", newline="") as outfile:
+        writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    cursor.close()
+    conn.close()
+
+    logging.info(f"🏁 Оновлення завершено. Дані збережено у {csv_path}")
+
+def upload_ru_translation_to_wp():
+    """
+    Створює RU переклад для кожного продукту UA через WPML.
+    Береться SKU з оригіналу, всі дані (images, attributes, categories) копіюються з оригіналу,
+    а поля name/content/excerpt беруться з CSV.
+    WPML автоматично підставляє SKU та зв'язок перекладу.
+    """
+    log_message_to_existing_file()
+    logging.info("🚀 Початок імпорту RU перекладів через WPML...")
+
+    settings = load_settings()
+    csv_path = settings["paths"].get("csv_path_sl_new_prod_ru")
+    if not csv_path:
+        logging.error("❌ Не вказано шлях до csv_path_sl_new_prod_ru у settings.json")
+        return
+
+    try:
+        wcapi = get_wc_api(settings)
+
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+
+            for idx, row in enumerate(reader, start=2):
+                sku = row.get("Sku")
+                trid = row.get("_wpml_import_translation_group")
+                if not sku or not trid:
+                    logging.warning(f"Рядок {idx}: пропущено через відсутній SKU або trid")
+                    continue
+
+                # --- 1️⃣ Отримати оригінальний продукт UA ---
+                resp = wcapi.get("products", params={"sku": sku, "lang": "uk"})
+                if not resp.ok:
+                    logging.warning(f"⚠️ SKU {sku}: не вдалося отримати оригінальний продукт UA: {resp.text}")
+                    continue
+
+                products = resp.json()
+                if not products:
+                    logging.warning(f"⚠️ SKU {sku}: оригінальний продукт UA не знайдено")
+                    continue
+
+                original = products[0]
+                original_id = original.get("id")
+
+                # --- 2️⃣ Категорії та атрибути в RU ---
+                categories_ru = []
+                for cat in original.get("categories", []):
+                    cat_id = cat.get("id")
+                    if cat_id:
+                        cat_resp = wcapi.get(f"products/categories/{cat_id}", params={"lang": "ru"})
+                        if cat_resp.ok:
+                            cat_data = cat_resp.json()
+                            categories_ru.append({"id": cat_data["id"], "name": cat_data["name"]})
+                        else:
+                            categories_ru.append({"name": cat.get("name")})
+                    else:
+                        categories_ru.append({"name": cat.get("name")})
+
+                attributes_ru = []
+                for attr in original.get("attributes", []):
+                    attr_id = attr.get("id")
+                    if attr_id:
+                        attr_resp = wcapi.get(f"products/attributes/{attr_id}/terms", params={"lang": "ru"})
+                        if attr_resp.ok:
+                            options_ru = [v.get("name") for v in attr_resp.json()]
+                        else:
+                            options_ru = [v for v in attr.get("options", [])]
+                        attributes_ru.append({
+                            "id": attr_id,
+                            "name": attr.get("name"),
+                            "position": attr.get("position", 0),
+                            "visible": attr.get("visible", True),
+                            "variation": attr.get("variation", False),
+                            "options": options_ru
+                        })
+                    else:
+                        attributes_ru.append(attr)
+
+                # --- 3️⃣ Дані перекладу ---
+                translated_data = {
+                    "lang": "ru",  # <-- ОБОВ'ЯЗКОВО
+                    "translation_of": original_id,  # посилання на оригінальний продукт UA
+                    "name": row.get("Title_ru", ""),
+                    "description": row.get("Content_ru", ""),
+                    "short_description": row.get("Excerpt_ru", ""),
+                    "meta_data": original.get("meta_data", []) + [
+                        {"key": "_wpml_import_translation_group", "value": trid},
+                        {"key": "_wpml_import_language_code", "value": "ru"},
+                        {"key": "_wpml_import_source_language_code", "value": "ua"}
+                    ],
+                    "categories": categories_ru,
+                    "attributes": attributes_ru,
+                    "images": original.get("images", []),
+                    "type": original.get("type", "simple"),
+                    "stock_status": original.get("stock_status", "instock"),
+                    "regular_price": original.get("regular_price", ""),
+                    "sale_price": original.get("sale_price", "")
+                    # SKU не передається, WPML автоматично підставить оригінальний
+                }
+
+                # --- 4️⃣ Створюємо переклад RU ---
+                post_resp = wcapi.post("products", translated_data)
+                if post_resp.ok:
+                    new_id = post_resp.json().get("id")
+                    logging.info(f"🆕 SKU {sku}: створено RU переклад (ID {new_id})")
+                else:
+                    logging.warning(f"⚠️ SKU {sku}: не вдалося створити RU переклад. {post_resp.text}")
+
+        logging.info("✅ Імпорт RU перекладів завершено успішно!")
+
+    except Exception as e:
+        logging.error(f"❌ Помилка під час імпорту перекладів: {e}")
