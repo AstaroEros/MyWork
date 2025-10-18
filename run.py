@@ -206,7 +206,7 @@ def main():
     parser.add_argument(
         "--update-image-seo-ru-from-csv",
         action="store_true",
-        help="Завантажити RU переклад товарів на сайт через WooCommerce + WPML."
+        help="Оновити RU SEO-атрибути головного зображення за CSV (без перезапису UA)."
     )
 
     # ✨ НОВИЙ АРГУМЕНТ для завантаження перекладів WPML

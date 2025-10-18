@@ -699,52 +699,77 @@ def _process_batch_update(wcapi: Any, batch_data: List[Dict[str, Any]], errors_l
 def find_media_ids_for_sku(wcapi, sku: str, uploads_path: str) -> List[Dict[str, Any]]:
     """
     Знаходить усі зображення для SKU у uploads_path та повертає список ID для WooCommerce.
-    Підтримує різні розширення та підпапки.
+    Ігнорує технічні копії (-150x150, -300x300, ...) і дублікати. GIF ставить останнім.
     """
-    def _get_media_id_by_filename(filename: str) -> int | None:
-        """Внутрішня функція: шукає ID медіа за slug або title"""
-        import requests
 
-        file_slug = os.path.splitext(filename)[0]
-
-        # Пошук за slug
+    def _get_media_id_by_filename(wcapi, filename):
+        """
+        Пошук ID медіафайлу у WordPress через REST API /wp/v2/media.
+        - Спочатку пробує публічно (без auth)
+        - Якщо отримано 401/403 — пробує повторно з WooCommerce ключами
+        - Ігнорує технічні суфікси типу -300x300.webp
+        """
         try:
-            response = wcapi.get("media", params={'search': file_slug, 'per_page': 1, 'orderby': 'slug'})
-            if response.status_code == 200:
-                items = response.json()
-                if items:
-                    item = items[0]
-                    if item.get('slug') == file_slug or item.get('title', {}).get('rendered') == filename:
-                        return item['id']
-        except Exception as e:
-            logging.error(f"Помилка при пошуку медіа ID для {filename} (slug): {e}")
+            clean_name = re.sub(r'-\d+x\d+(?=\.)', '', filename)
+            file_slug = os.path.splitext(clean_name)[0]
+            wp_media_url = f"{wcapi.url.rstrip('/')}/wp-json/wp/v2/media"
+            params = {"search": file_slug, "per_page": 1}
 
-        # Пошук за точним title
-        try:
-            response = wcapi.get("media", params={'search': filename, 'per_page': 1, 'orderby': 'title'})
-            if response.status_code == 200:
-                items = response.json()
-                if items:
-                    item = items[0]
-                    if item.get('title', {}).get('rendered') == filename:
-                        return item['id']
-        except Exception as e:
-            logging.error(f"Помилка при пошуку медіа ID для {filename} (title): {e}")
+            # 1️⃣ Пробуємо без авторизації
+            response = requests.get(wp_media_url, params=params, timeout=15)
 
-        logging.warning(f"⚠️ Медіа ID для файлу '{filename}' не знайдено.")
+            # 2️⃣ Якщо 401/403 — пробуємо з ключами WooCommerce
+            if response.status_code in (401, 403):
+                logging.debug(f"🔒 REST API потребує авторизації для '{file_slug}', пробую з ключами WooCommerce...")
+                response = requests.get(
+                    wp_media_url,
+                    params=params,
+                    auth=(wcapi.consumer_key, wcapi.consumer_secret),
+                    timeout=15
+                )
+
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, list) and data:
+                    item = data[0]
+                    media_id = item.get("id")
+                    media_url = item.get("source_url", "")
+                    media_title = item.get("title", {}).get("rendered", "")
+                    logging.debug(f"✅ Знайдено медіа '{file_slug}' → ID: {media_id} | Назва: {media_title} | URL: {media_url}")
+                    return media_id
+                else:
+                    logging.warning(f"⚠️ Медіа '{file_slug}' не знайдено у WP медіатеці.")
+            else:
+                logging.error(f"❌ Помилка {response.status_code} при пошуку медіа '{file_slug}'.")
+        except Exception as e:
+            logging.error(f"❌ Виняток при пошуку медіа '{filename}': {e}", exc_info=True)
         return None
 
-    media_ids = []
+    # --- Основна логіка ---
     pattern = os.path.join(uploads_path, '**', f'{sku}*.*')
     files = glob.glob(pattern, recursive=True)
+
+    # Прибираємо технічні копії (-150x150, -300x300) і дублікати
+    unique_files = set()
     for file_path in files:
         filename = os.path.basename(file_path)
-        media_id = _get_media_id_by_filename(filename)
+        clean_name = re.sub(r'-\d+x\d+(?=\.)', '', filename)
+        unique_files.add(clean_name)
+
+    # Сортуємо: GIF останнім
+    sorted_files = sorted(unique_files, key=lambda f: (f.lower().endswith('.gif'), f))
+
+    media_ids = []
+    for filename in sorted_files:
+        media_id = _get_media_id_by_filename(wcapi, filename)
         if media_id:
             media_ids.append({"id": media_id})
 
     if not media_ids:
         logging.warning(f"⚠️ SKU {sku}: Не знайдено зображень у '{uploads_path}'")
+    else:
+        logging.info(f"🖼️ SKU {sku}: Додано {len(media_ids)} унікальних зображень.")
+
     return media_ids
 
 # --- ДОПОМІЖНА ФУНКЦІЯ ДЛЯ ПАКЕТНОГО ЗАПИСУ (Створення) ---
@@ -1241,7 +1266,7 @@ def translate_text_deepl(text, target_lang="RU", api_key=None, api_url=None):
 
     translated_chunks = []
     for chunk in chunks:
-        pattern = r'\b[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-Z0-9]\b|\b[a-zA-Z0-9]+\b'
+        pattern = r'\b[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]\b|\b[a-zA-Z0-9]+\b'
         
         # --- ЗМІНА 1: Використовуємо короткий тег <i> ---
         chunk_with_tags = re.sub(pattern, r'<i>\g<0></i>', chunk)

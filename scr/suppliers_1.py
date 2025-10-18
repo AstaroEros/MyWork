@@ -1417,26 +1417,31 @@ def create_new_products_batch():
         logging.critical("❌ Не вдалося створити об'єкт WooCommerce API.")
         return
 
-# --- Завантаження локального списку категорій ---
+    # --- Завантаження локального списку категорій ---
     categories_map = {}
     try:
         cat_path = settings['paths'].get('product_categories')
         if cat_path and os.path.exists(cat_path):
-            with open(cat_path, mode='r', encoding='utf-8') as cat_file:
-                reader = csv.DictReader(cat_file)
-                
-                # Додаємо логування перших кількох категорій, як вони обробляються
+            with open(cat_path, mode='r', encoding='utf-8-sig') as cat_file:
+                reader = csv.DictReader(cat_file, delimiter=',', quotechar='"')
+
+                # Додаткове логування для перевірки структури
+                first_row = next(reader, None)
+                if first_row:
+                    logging.debug(f"🔍 Перша строка з файлу категорій: {first_row}")
+                    # Повертаємо курсор на початок для нормального зчитування
+                    cat_file.seek(0)
+                    reader = csv.DictReader(cat_file, delimiter=',', quotechar='"')
+
                 log_count = 0
                 for row in reader:
-                    name = row.get('name', '').strip().lower() # Тільки видаляємо пробіли і переводимо в нижній регістр
+                    name = row.get('name', '').strip().lower()
                     term_id = row.get('term_id', '').strip()
                     if name and term_id.isdigit():
                         categories_map[name] = int(term_id)
-                        
-                        # НОВЕ ЛОГУВАННЯ 1: Показуємо, що ми додали до мапи
                         if log_count < 5:
-                             logging.debug(f"🔍 [MAP] Додано категорію: '{name}' -> ID: {term_id}")
-                             log_count += 1
+                            logging.debug(f"🔍 [MAP] Додано категорію: '{name}' -> ID: {term_id}")
+                            log_count += 1
 
             logging.info(f"✅ Завантажено {len(categories_map)} категорій з {cat_path}")
         else:
@@ -1474,6 +1479,16 @@ def create_new_products_batch():
                     total_skipped += 1
                     continue
 
+                # --- Перевірка, чи товар зі SKU вже існує у WooCommerce ---
+                try:
+                    existing_products = wcapi.get("products", params={"sku": sku}).json()
+                    if isinstance(existing_products, list) and existing_products:
+                        logging.warning(f"⚠️ Товар зі SKU {sku} вже існує — пропускаю.")
+                        total_skipped += 1
+                        continue
+                except Exception as e:
+                    logging.error(f"❌ Не вдалося перевірити SKU {sku} у WooCommerce: {e}")
+
                 product_data = {"sku": sku, "name": name, "status": "draft"}
                 meta_data = []
                 attributes = []
@@ -1507,7 +1522,7 @@ def create_new_products_batch():
                     # --- атрибути ---
                     elif key.startswith(ATTRIBUTE_PREFIX):
                         attr_name = key.replace(ATTRIBUTE_PREFIX, '')
-                        options = [v.strip() for v in re.split(r'[;,|]', value) if v.strip()]
+                        options = [v.strip() for v in re.split(r'[;|]', value) if v.strip()]
                         if options:
                             attr = {
                                 "name": attr_name,
