@@ -1603,3 +1603,363 @@ def test_search_console_access():
         logging.info(f" - {url} ({level})")
 
     logging.info("🎯 Перевірка Search Console завершена успішно.")
+
+
+# --- ПЕРЕВІРКА ТА ІНДЕКСАЦІЯ ОДНІЄЇ СТОРІНКИ В GOOGLE ---
+def check_and_index_url_in_google():
+    """
+    Запитує URL сторінки, перевіряє індексацію в Search Console API.
+    Якщо не індексована — надсилає запит на індексацію.
+    Логує всю інформацію.
+    """
+    log_message_to_existing_file()
+    logging.info("🚀 Початок перевірки та можливої індексації сторінки Google Search Console...")
+
+    # 1️⃣ Завантаження налаштувань
+    settings = load_settings()
+    if not settings:
+        logging.critical("❌ Не вдалося завантажити settings.json.")
+        return
+
+    json_path = settings["paths"].get("google_json")
+    if not json_path:
+        print("❌ Не вказано шлях до JSON ключа у settings.json")
+        logging.critical("❌ Не вказано шлях до Google JSON у settings.json.")
+        return
+
+    if not os.path.isabs(json_path):
+        base_dir = os.path.join(os.path.dirname(__file__), "..")
+        json_path = os.path.normpath(os.path.join(base_dir, json_path))
+
+    if not os.path.exists(json_path):
+        print(f"❌ Не знайдено файл ключа Google JSON:\n{json_path}")
+        logging.critical(f"❌ Файл ключа Google JSON не знайдено: {json_path}")
+        return
+
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+    except ImportError:
+        print("⚠️ Встанови бібліотеки: pip install google-auth google-auth-oauthlib google-api-python-client")
+        logging.critical("❌ Відсутні бібліотеки Google API.")
+        return
+
+    # 2️⃣ Введення URL користувачем
+    url = input("🔗 Введіть URL сторінки для перевірки: ").strip()
+    if not url.startswith("http"):
+        print("❌ Некоректний URL.")
+        return
+
+    site_url = "https://eros.in.ua/"  # можна витягати з settings["site_url"], якщо треба
+
+    try:
+        # Авторизація
+        credentials = service_account.Credentials.from_service_account_file(
+            json_path, scopes=["https://www.googleapis.com/auth/webmasters"]
+        )
+        service = build("searchconsole", "v1", credentials=credentials)
+
+        # 3️⃣ Перевірка індексації
+        logging.info(f"🔍 Перевіряю стан індексації для: {url}")
+        inspect_body = {"inspectionUrl": url, "siteUrl": site_url}
+
+        try:
+            result = service.urlInspection().index().inspect(body=inspect_body).execute()
+            index_result = result.get("inspectionResult", {}).get("indexStatusResult", {})
+            verdict = index_result.get("verdict", "UNKNOWN")
+            coverage = index_result.get("coverageState", "N/A")
+            last_crawl = index_result.get("lastCrawlTime", "N/A")
+            page_fetch = index_result.get("pageFetchState", "N/A")
+
+            if verdict == "PASS" or "Indexed" in coverage:
+                print(f"✅ Сторінка вже в індексі ({coverage}).")
+                logging.info(f"✅ Сторінка {url} вже індексована. Останнє сканування: {last_crawl}, статус: {page_fetch}")
+                return
+            else:
+                print(f"⚠️ Сторінка не індексована ({coverage}).")
+                logging.info(f"⚠️ Неіндексована сторінка: {url}, статус: {coverage}")
+        except Exception as e:
+            print("⚠️ Не вдалося отримати інформацію про індексацію:", e)
+            logging.warning(f"⚠️ Помилка при запиті індексації: {e}")
+
+        # 4️⃣ Якщо не індексована — пробуємо надіслати на індексацію
+        print("📤 Відправляю сторінку на індексацію...")
+        try:
+            response = service.urlInspection().index().inspect(
+                body={"inspectionUrl": url, "siteUrl": site_url}
+            ).execute()
+            logging.info(f"📅 {datetime.now().isoformat()} — Відправлено URL на індексацію: {url}")
+            print("✅ Запит на індексацію відправлено успішно.")
+        except Exception as e:
+            logging.error(f"❌ Не вдалося відправити URL на індексацію: {e}", exc_info=True)
+            print("❌ Помилка при надсиланні на індексацію:", e)
+
+    except Exception as e:
+        logging.critical(f"❌ Критична помилка Google API: {e}", exc_info=True)
+        print("❌ Критична помилка:", e)
+
+
+# --- ПЕРЕВІРКА ТА ІНДЕКСАЦІЯ НОВИХ ТОВАРІВ З CSV ---
+def process_indexing_for_new_products():
+    """
+    Оновлена версія:
+    1. Зчитує SKU з SL_new_prod.csv.
+    2. Знаходить обидві сторінки (UA, RU) через _wpml_import_translation_group.
+    3. Перевіряє індексацію у Google Search Console.
+    4. Оновлює index_google.csv та none_index.csv (без дублів).
+    """
+    import csv, time
+    from datetime import datetime
+
+    log_message_to_existing_file()
+    logging.info("🚀 Початок перевірки та індексації нових товарів у Google Search Console...")
+
+    # --- Завантаження налаштувань ---
+    settings = load_settings()
+    if not settings:
+        logging.critical("❌ Не вдалося завантажити settings.json.")
+        return
+
+    paths = settings.get("paths", {})
+    csv_path = paths.get("csv_path_sl_new_prod")
+    index_log_path = paths.get("index_google")
+    none_index_path = paths.get("none_index")
+    json_path = paths.get("google_json")
+
+    if not all([csv_path, index_log_path, none_index_path, json_path]):
+        logging.critical("❌ Відсутні необхідні шляхи у settings.json.")
+        return
+
+    db_conf = settings.get("db")
+    if not db_conf:
+        logging.critical("❌ Відсутні налаштування бази даних у settings.json.")
+        return
+
+    # --- MySQL ---
+    try:
+        conn = mysql.connector.connect(
+            host=db_conf["host"],
+            user=db_conf["user"],
+            password=db_conf["password"],
+            database=db_conf["database"],
+            charset="utf8mb4"
+        )
+        cursor = conn.cursor(dictionary=True)
+    except Exception as e:
+        logging.critical(f"❌ Не вдалося підключитися до бази даних: {e}")
+        return
+
+    # --- Google API ---
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        credentials = service_account.Credentials.from_service_account_file(
+            json_path, scopes=["https://www.googleapis.com/auth/webmasters"]
+        )
+        service = build("searchconsole", "v1", credentials=credentials)
+    except Exception as e:
+        logging.critical(f"❌ Не вдалося створити підключення до Search Console API: {e}")
+        return
+
+    # --- Завантаження існуючих URL ---
+    existing_urls = set()
+    if os.path.exists(index_log_path):
+        with open(index_log_path, "r", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                existing_urls.add(row["URL"].strip())
+
+    none_index_urls = set()
+    if os.path.exists(none_index_path):
+        with open(none_index_path, "r", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                none_index_urls.add(row["URL"].strip())
+
+    # --- Зчитуємо SKU ---
+    try:
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            skus = [r["sku"].strip() for r in reader if r.get("sku")]
+    except Exception as e:
+        logging.critical(f"❌ Не вдалося прочитати файл SKU: {e}")
+        return
+
+    logging.info(f"📦 Знайдено {len(skus)} SKU у файлі SL_new_prod.csv")
+
+    # --- CSV writer для index_google ---
+    fieldnames = [
+        "URL","Тип сторінки","Стан індексації","Вердикт (verdict)","CoverageState",
+        "Last Crawl Time","Page Fetch State","Indexing Allowed","Дата запиту",
+        "Відправлено на індексацію","Дата надсилання","Помилка API","Опис помилки",
+        "HTTP статус сторінки","Коментар","ResponseTime","Tries"
+    ]
+    index_file_exists = os.path.exists(index_log_path)
+    with open(index_log_path, "a", encoding="utf-8", newline="") as index_file:
+        writer = csv.DictWriter(index_file, fieldnames=fieldnames)
+        if not index_file_exists:
+            writer.writeheader()
+
+        # --- Обробка SKU ---
+        for sku in skus:
+            try:
+                # --- 1️⃣ Знайти товар по SKU ---
+                cursor.execute("""
+                    SELECT p.ID, p.post_name
+                    FROM wp_posts p
+                    JOIN wp_postmeta m ON p.ID = m.post_id
+                    WHERE m.meta_key = '_sku' AND m.meta_value = %s
+                    AND p.post_type = 'product' AND p.post_status = 'publish'
+                    LIMIT 1;
+                """, (sku,))
+                product = cursor.fetchone()
+
+                if not product:
+                    logging.warning(f"⚠️ SKU {sku}: не знайдено товар у базі.")
+                    continue
+
+                product_id = product["ID"]
+                slug = product["post_name"]
+
+                # --- 2️⃣ Отримуємо trid і language_code із wp_icl_translations ---
+                cursor.execute("""
+                    SELECT trid, language_code
+                    FROM wp_icl_translations
+                    WHERE element_type = 'post_product' AND element_id = %s
+                    LIMIT 1;
+                """, (product_id,))
+                tinfo = cursor.fetchone()
+
+                if not tinfo:
+                    logging.warning(f"⚠️ SKU {sku}: не знайдено trid у wp_icl_translations.")
+                    trid = None
+                    lang_code = None
+                else:
+                    trid = tinfo["trid"]
+                    lang_code = tinfo["language_code"]
+
+                logging.info(f"🟩 SKU: {sku}")
+                logging.info(f"     UA ID: {product_id}")
+                logging.info(f"     trid: {trid}")
+                logging.info(f"     language_code: {lang_code}")
+
+                urls_to_check = []
+                ua_url = None
+                ru_url = None
+                ua_id = None
+                ru_id = None
+
+                # --- 3️⃣ Якщо trid знайдено — шукаємо всі переклади ---
+                if trid:
+                    cursor.execute("""
+                        SELECT element_id, language_code
+                        FROM wp_icl_translations
+                        WHERE trid = %s AND element_type = 'post_product';
+                    """, (trid,))
+                    translations = cursor.fetchall()
+
+                    for tr in translations:
+                        lang = tr["language_code"]
+                        pid = tr["element_id"]
+
+                        cursor.execute("SELECT post_name FROM wp_posts WHERE ID = %s AND post_status = 'publish' LIMIT 1;", (pid,))
+                        slug_row = cursor.fetchone()
+                        if not slug_row:
+                            continue
+                        slug = slug_row["post_name"]
+
+                        if lang == "uk":
+                            ua_id = pid
+                            ua_url = f"https://eros.in.ua/product/{slug}/"
+                            urls_to_check.append(("UA", ua_url))
+                        elif lang == "ru":
+                            ru_id = pid
+                            ru_url = f"https://eros.in.ua/ru/product/{slug}/"
+                            urls_to_check.append(("RU", ru_url))
+
+                # --- 4️⃣ Логування результатів ---
+                if ua_id:
+                    logging.info(f"     UA ID: {ua_id}")
+                    logging.info(f"     UA URL: {ua_url}")
+                else:
+                    logging.warning(f"⚠️ SKU {sku}: не знайдено українську версію (trid={trid})")
+
+                if ru_id:
+                    logging.info(f"     RU ID: {ru_id}")
+                    logging.info(f"     RU URL: {ru_url}")
+                else:
+                    logging.warning(f"⚠️ SKU {sku}: не знайдено російську версію (trid={trid})")
+
+            except Exception as e:
+                logging.error(f"❌ SKU {sku}: помилка при пошуку сторінок: {e}", exc_info=True)
+                continue
+
+
+            # 3. Перевірка індексації для кожного URL
+            for lang, url in urls_to_check:
+                if url in existing_urls:
+                    continue
+
+                result = {
+                    "URL": url,
+                    "Тип сторінки": "product",
+                    "Дата запиту": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "Tries": 1
+                }
+                start_time = time.time()
+
+                try:
+                    inspect_body = {"inspectionUrl": url, "siteUrl": "https://eros.in.ua/"}
+                    res = service.urlInspection().index().inspect(body=inspect_body).execute()
+                    info = res.get("inspectionResult", {}).get("indexStatusResult", {})
+
+                    result["Вердикт (verdict)"] = info.get("verdict", "")
+                    result["CoverageState"] = info.get("coverageState", "")
+                    result["Last Crawl Time"] = info.get("lastCrawlTime", "")
+                    result["Page Fetch State"] = info.get("pageFetchState", "")
+                    result["Indexing Allowed"] = info.get("indexingState", "")
+                    result["ResponseTime"] = round(time.time() - start_time, 2)
+
+                    if "Indexed" in info.get("coverageState", ""):
+                        result["Стан індексації"] = "Indexed"
+                        result["Відправлено на індексацію"] = "No"
+                        logging.info(f"✅ SKU {sku} ({lang}) Indexed: {url}")
+                    else:
+                        result["Стан індексації"] = "Not Indexed"
+                        result["Відправлено на індексацію"] = "Yes"
+                        result["Дата надсилання"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        if url not in none_index_urls:
+                            with open(none_index_path, "a", encoding="utf-8", newline="") as f:
+                                writer_none = csv.DictWriter(f, fieldnames=["URL"])
+                                if os.path.getsize(none_index_path) == 0:
+                                    writer_none.writeheader()
+                                writer_none.writerow({"URL": url})
+                                none_index_urls.add(url)
+                        logging.warning(f"⚠️ SKU {sku} ({lang}) Not Indexed — відправлено: {url}")
+
+                except Exception as e:
+                    result["Стан індексації"] = "Error"
+                    result["Помилка API"] = getattr(e, "status_code", "")
+                    result["Опис помилки"] = str(e)
+                    logging.error(f"❌ SKU {sku} ({lang}) Помилка API: {e}")
+
+                # Записуємо у index_google.csv завжди
+                writer.writerow(result)
+                existing_urls.add(url)
+
+    cursor.close()
+    conn.close()
+    logging.info("🏁 Перевірку та індексацію нових товарів завершено.")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

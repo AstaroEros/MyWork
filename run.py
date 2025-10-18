@@ -1,6 +1,7 @@
 import argparse
 from scr.base_function import check_version, check_csv_data, export_product_by_id, update_image_seo_by_sku, translate_csv_to_ru, \
-                        log_global_attributes, convert_local_attributes_to_global, test_search_console_access
+                        log_global_attributes, convert_local_attributes_to_global, test_search_console_access, \
+                        check_and_index_url_in_google, process_indexing_for_new_products
 from scr.products import export_products, download_supplier_price_list, process_supplier_1_price_list, \
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
@@ -239,6 +240,18 @@ def main():
         help="Перевірити підключення до Google Search Console API."
     )
 
+    parser.add_argument(
+        "--check-url-index",
+        action="store_true",
+        help="Перевірити сторінку на індексацію та за потреби надіслати у Google."
+    )
+
+    parser.add_argument(
+        "--index-new-products",
+        action="store_true",
+        help="Перевірити індексацію нових товарів і відправити відсутні сторінки на індексацію."
+    )
+
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -381,6 +394,14 @@ def main():
     elif args.check_searchconsole:
         print("🌐 Перевіряю доступ до Google Search Console...")
         test_search_console_access()
+
+    elif args.check_url_index:
+        print("🔍 Перевіряю сторінку у Search Console...")
+        check_and_index_url_in_google()
+
+    elif args.index_new_products:
+        print("🌐 Запускаю перевірку індексації нових товарів...")
+        process_indexing_for_new_products()
 
     else:
         # Якщо аргументи не вказано, вивести довідку
