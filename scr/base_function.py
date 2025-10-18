@@ -4,6 +4,7 @@ import os, csv, shutil, logging, requests, mimetypes, glob
 import logging
 import html
 import re
+import mysql.connector
 from datetime import datetime
 from typing import Dict, Tuple, List, Optional, Any
 from PIL import Image
@@ -11,6 +12,7 @@ from bs4 import BeautifulSoup
 import time
 
 
+# --- ЗАГАЛЬНІ ФУНКЦІЇ ---
 def load_settings():
     """
     Завантаження конфігурації з settings.json
@@ -26,8 +28,7 @@ def load_settings():
         print(f"❌ Помилка: файл конфігурації пошкоджений: {config_path}")
         return None
 
-
-
+# --- ПІДКЛЮЧЕННЯ ДО WOOCOMMERCE API ---
 def get_wc_api(settings):
     """
     Завантаження конфігурації з settings.json
@@ -42,10 +43,11 @@ def get_wc_api(settings):
         consumer_secret=settings["consumer_secret"],
         version="wc/v3",
         timeout=120,
-        query_string_auth=True
+        query_string_auth=False  # Змінив з True 👈 використовує Basic Auth (рекомендовано) 
     )
     return wcapi
 
+# --- ПЕРЕВІРКА ВЕРСІЇ WOOCOMMERCE ---
 def check_version():
     wcapi = get_wc_api()
     response = wcapi.get("system_status")
@@ -55,8 +57,7 @@ def check_version():
     else:
         print("Error:", response.status_code, response.text)
 
-
-
+# --- ЛОГУВАННЯ (Створення нового файлу)---
 def setup_new_log_file():
     """
     Перейменовує існуючий лог-файл та налаштовує новий,
@@ -91,6 +92,7 @@ def setup_new_log_file():
     )
     logging.info("--- Новий сеанс логування розпочато ---")
 
+# --- ЛОГУВАННЯ (Запис в існуючий файл)---
 def log_message_to_existing_file():
     """
     Налаштовує логування для дописування в існуючий файл,
@@ -109,15 +111,15 @@ def log_message_to_existing_file():
     if not logging.getLogger().hasHandlers():
         logging.basicConfig(
             filename=current_log_path,
-            level=logging.INFO,
+            #level=logging.INFO,
+            level=logging.DEBUG,
             format='%(asctime)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S',
             filemode='a'
         )
     logging.info("--- Повідомлення додано до існуючого логу ---")
 
-
-
+# --- ПЕРЕВІРКА CSV ---
 def check_csv_data(profile_id):
     """
     Перевіряє CSV-файл на відповідність правилам, визначеним у settings.json.
@@ -281,14 +283,13 @@ def check_csv_data(profile_id):
     logging.info(f"✅ Перевірка файлу пройшла успішно.")
     return True
 
+# --- РОБОТА З ФАЙЛАМИ КОНФІГУРАЦІЇ (attribute.csv, category.csv, poznachky.csv) ---
 def get_config_path(filename):
     """Повертає повний шлях до файлу конфігурації."""
     # Припускаємо, що config знаходиться на один рівень вище від scr
     current_dir = os.path.dirname(os.path.abspath(__file__))
     config_dir = os.path.abspath(os.path.join(current_dir, '..', 'config'))
     return os.path.join(config_dir, filename)
-
-
 
 def load_attributes_csv():
     """
@@ -366,8 +367,6 @@ def save_attributes_csv(raw_data):
         logging.info("Файл атрибутів attribute.csv оновлено.")
     except Exception as e:
         logging.error(f"Помилка при збереженні файлу атрибутів attribute.csv: {e}")
-
-
 
 def load_category_csv():
     """
@@ -481,8 +480,7 @@ def load_poznachky_csv():
         logging.error(f"Виникла помилка при завантаженні poznachky.csv: {e}")
         return []
 
-
-
+# --- ОБРОБКА ЗОБРАЖЕНЬ ---   
 def clear_directory(folder_path: str):
     """Очищає або створює директорію."""
     if not os.path.exists(folder_path):
@@ -569,6 +567,7 @@ def convert_to_webp_square(src: str, dest: str) -> int:
     logging.info(f"🟢 WEBP-конвертовано {converted} зображень.")
     return converted
 
+# --- ЗАВАНТАЖЕННЯ ЗОБРАЖЕНЬ ТОВАРУ ---
 def download_product_images(url: str, sku: str, category: str, base_path: str, cat_map: Dict[str, str]) -> List[str]:
     """Завантажує всі зображення товару з URL."""
     cat_slug = cat_map.get(category.strip()) or category.strip().lower().replace(' ', '_').replace(',', '')
@@ -604,6 +603,7 @@ def download_product_images(url: str, sku: str, category: str, base_path: str, c
 
     return files
 
+# --- СИНХРОНІЗАЦІЯ КОЛОНКИ WEBP У CSV ---
 def sync_webp_column(sl_path: str, webp_path: str, col_index: int, sku_index: int) -> int:
     """Оновлює колонку WEBP/GIF-списків у CSV."""
     with open(sl_path, 'r', encoding='utf-8') as f:
@@ -632,6 +632,7 @@ def sync_webp_column(sl_path: str, webp_path: str, col_index: int, sku_index: in
     logging.info(f"🔁 Оновлено {updated} SKU у колонці WEBP.")
     return updated
 
+# --- КОПІЮВАННЯ ФАЙЛІВ У ФІНАЛЬНУ ДИРЕКТОРІЮ ---
 def copy_to_site(src: str, dest: str):
     """Копіює WEBP/GIF до фінальної директорії з правами."""
     uid, gid = 33, 33
@@ -657,13 +658,7 @@ def copy_to_site(src: str, dest: str):
     logging.info(f"📦 Скопійовано {copied} файлів у {dest}.")
     return copied
 
-
-
-
-
-
-
-
+# --- ДОПОМІЖНА ФУНКЦІЯ ДЛЯ ПАКЕТНОГО ЗАПИСУ (Оновлення) ---
 def _process_batch_update(wcapi: Any, batch_data: List[Dict[str, Any]], errors_list: List[str]) -> int:
     """Виконує пакетний запит 'update' до WooCommerce API."""
     
@@ -699,8 +694,8 @@ def _process_batch_update(wcapi: Any, batch_data: List[Dict[str, Any]], errors_l
         errors_list.append(err_msg)
         logging.critical(err_msg, exc_info=True)
         return 0
-    
 
+# --- ДОПОМІЖНА ФУНКЦІЯ ДЛЯ Пошуку Media IDs ---
 def find_media_ids_for_sku(wcapi, sku: str, uploads_path: str) -> List[Dict[str, Any]]:
     """
     Знаходить усі зображення для SKU у uploads_path та повертає список ID для WooCommerce.
@@ -752,9 +747,7 @@ def find_media_ids_for_sku(wcapi, sku: str, uploads_path: str) -> List[Dict[str,
         logging.warning(f"⚠️ SKU {sku}: Не знайдено зображень у '{uploads_path}'")
     return media_ids
 
-
-
-# --- ДОПОМІЖНА ФУНКЦІЯ ДЛЯ ПАКЕТНОГО ЗАПИСУ (Створення) (без змін) ---
+# --- ДОПОМІЖНА ФУНКЦІЯ ДЛЯ ПАКЕТНОГО ЗАПИСУ (Створення) ---
 def _process_batch_create(wcapi: Any, batch_data: List[Dict[str, Any]], errors_list: List[str]) -> int:
     """Виконує пакетний запит 'create' до WooCommerce API."""
     
@@ -788,7 +781,6 @@ def _process_batch_create(wcapi: Any, batch_data: List[Dict[str, Any]], errors_l
         errors_list.append(err_msg)
         logging.critical(err_msg, exc_info=True)
         return 0
-    
 
 def _clean_text(value: str) -> str:
     """Очищує HTML-теги, кодування і зайві пробіли."""
@@ -798,6 +790,7 @@ def _clean_text(value: str) -> str:
     value = re.sub(r"<.*?>", "", value)  # видаляє HTML-теги
     return value.strip()
 
+# --- ЕКСПОРТ ТОВАРУ ЗА ID ---
 def export_product_by_id():
     """
     Експортує всі дані товару за введеним ID у /csv/input/ID_tovar.csv.
@@ -898,10 +891,7 @@ def export_product_by_id():
     except Exception as e:
         logging.error(f"❌ Помилка під час експорту: {e}", exc_info=True)
 
-
-
-
-
+# --- ОНОВЛЕННЯ SEO-АТРИБУТІВ ЗОБРАЖЕНЬ ---
 def update_image_seo_by_sku():
     """
     Оновлює SEO-атрибути зображень товару за SKU.
@@ -1106,9 +1096,95 @@ def update_image_seo_by_sku():
 
     print(f"🎯 Завершено. Успішно оновлено: {updated}, не вдалося: {failed}.")
 
+# --- ЗАПОВНЕННЯ КОЛОНКИ _wpml_import_translation_group ---
+def fill_wpml_translation_group():
+    """
+    Шукає trid (_wpml_import_translation_group) у базі WordPress
+    за SKU і оновлює цей самий CSV-файл (без створення копії).
+    """
+    log_message_to_existing_file()
+    logging.info("🚀 Початок оновлення колонки _wpml_import_translation_group")
 
+    settings = load_settings()
+    csv_path = settings["paths"].get("csv_path_sl_new_prod_ru")
+    db_conf = settings.get("db")
 
+    # 🔹 Перевірка конфігурації
+    if not db_conf:
+        logging.error("❌ У settings.json відсутній розділ 'db' з параметрами бази даних")
+        return
 
+    # 🔹 Підключення до MySQL
+    conn = mysql.connector.connect(
+        host=db_conf["host"],
+        user=db_conf["user"],
+        password=db_conf["password"],
+        database=db_conf["database"],
+        charset="utf8mb4"
+    )
+    cursor = conn.cursor(dictionary=True)
+
+    # 🔹 Зчитуємо усі рядки з файлу
+    with open(csv_path, "r", encoding="utf-8") as infile:
+        reader = csv.DictReader(infile)
+        rows = list(reader)
+        fieldnames = reader.fieldnames
+        if "_wpml_import_translation_group" not in fieldnames:
+            fieldnames.append("_wpml_import_translation_group")
+
+    logging.info("🚀 Початок пошуку trid для кожного SKU...")
+
+    # 🔹 Обробка кожного SKU
+    for idx, row in enumerate(rows, start=2):
+        sku = row.get("Sku")
+        if not sku:
+            logging.warning(f"Рядок {idx}: пропущено через відсутній SKU")
+            continue
+
+        # Знайти product_id за SKU
+        cursor.execute("""
+            SELECT pm.post_id
+            FROM wp_postmeta pm
+            JOIN wp_posts p ON p.ID = pm.post_id
+            WHERE pm.meta_key = '_sku' AND pm.meta_value = %s AND p.post_type = 'product'
+            LIMIT 1;
+        """, (sku,))
+        res = cursor.fetchone()
+
+        if not res:
+            logging.warning(f"⚠️ SKU {sku}: товар не знайдено у базі")
+            continue
+
+        product_id = res["post_id"]
+
+        # Знайти trid
+        cursor.execute("""
+            SELECT trid
+            FROM wp_icl_translations
+            WHERE element_type = 'post_product' AND element_id = %s
+            LIMIT 1;
+        """, (product_id,))
+        trid_res = cursor.fetchone()
+
+        if trid_res:
+            trid = trid_res["trid"]
+            row["_wpml_import_translation_group"] = trid
+            logging.info(f"✅ SKU {sku}: знайдено trid = {trid}")
+        else:
+            logging.warning(f"⚠️ SKU {sku}: не знайдено trid у wp_icl_translations")
+
+    # 🔹 Записуємо назад у той самий файл
+    with open(csv_path, "w", encoding="utf-8", newline="") as outfile:
+        writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    cursor.close()
+    conn.close()
+
+    logging.info(f"🏁 Оновлення завершено. Дані збережено у {csv_path}")
+
+# --- ПЕРЕКЛАД CSV УКР → РУС ---
 def clean_text(text):
     """
     Видаляє HTML теги та зайві пробіли.
@@ -1139,8 +1215,8 @@ def get_deepl_usage(api_key, api_url="https://api-free.deepl.com/v2/usage"):
 
 def translate_text_deepl(text, target_lang="RU", api_key=None, api_url=None):
     """
-    Переклад тексту через DeepL API.
-    Розбиває на абзаци по 500 символів, щоб Free API не повертав оригінал.
+    Переклад тексту через DeepL API з ігноруванням англійських слів та кодів.
+    Використовує короткий тег <i> для економії символів.
     """
     if not text.strip():
         return text
@@ -1150,7 +1226,7 @@ def translate_text_deepl(text, target_lang="RU", api_key=None, api_url=None):
     if not api_url:
         api_url = "https://api-free.deepl.com/v2/translate"
 
-    # Розбиваємо на шматки <= 500 символів
+    # Розбиваємо текст на шматки, щоб уникнути обмежень API
     chunks = []
     current = ""
     for paragraph in text.split(". "):
@@ -1165,18 +1241,36 @@ def translate_text_deepl(text, target_lang="RU", api_key=None, api_url=None):
 
     translated_chunks = []
     for chunk in chunks:
+        pattern = r'\b[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-Z0-9]\b|\b[a-zA-Z0-9]+\b'
+        
+        # --- ЗМІНА 1: Використовуємо короткий тег <i> ---
+        chunk_with_tags = re.sub(pattern, r'<i>\g<0></i>', chunk)
+
         try:
             response = requests.post(
                 api_url,
-                data={"auth_key": api_key, "text": chunk, "target_lang": target_lang},
+                data={
+                    "auth_key": api_key,
+                    "text": chunk_with_tags,
+                    "target_lang": target_lang,
+                    "tag_handling": "xml",
+                    # --- ЗМІНА 2: Вказуємо новий тег для ігнорування ---
+                    "ignore_tags": "i" 
+                },
                 timeout=30
             )
             response.raise_for_status()
-            translated_chunks.append(response.json()["translations"][0]["text"])
-            time.sleep(0.5)  # пауза між запитами
+            
+            translated_text = response.json()["translations"][0]["text"]
+            
+            # Надійне очищення тегів, якщо API їх випадково повернув
+            translated_text = translated_text.replace("<i>", "").replace("</i>", "")
+            
+            translated_chunks.append(translated_text)
+            time.sleep(0.5)
         except Exception as e:
             logging.error(f"Помилка перекладу: {e}")
-            translated_chunks.append(chunk)  # повертаємо оригінал у разі помилки
+            translated_chunks.append(chunk)
 
     return " ".join(translated_chunks)
 
@@ -1244,3 +1338,174 @@ def translate_csv_to_ru():
         logging.error(f"❌ Вхідний файл не знайдено: {input_path}")
     except Exception as e:
         logging.error(f"❌ Помилка при перекладі CSV: {e}")
+
+# --- ЛОГУВАННЯ ГЛОБАЛЬНИХ АТРИБУТІВ WOO ---
+def log_global_attributes():
+    """
+    Отримує список глобальних атрибутів WooCommerce (pa_*)
+    і виводить їх у лог із ID, slug та назвою.
+    """
+    log_message_to_existing_file()
+    logging.info("🔍 Починаю отримання списку глобальних атрибутів WooCommerce...")
+
+    settings = load_settings()
+    if not settings:
+        logging.error("❌ Не вдалося завантажити settings.json")
+        return
+
+    wcapi = get_wc_api(settings)
+    if not wcapi:
+        logging.error("❌ Не вдалося створити об'єкт WooCommerce API.")
+        return
+
+    try:
+        page = 1
+        all_attributes = []
+        MAX_PAGES = 5  # 🔒 безпечна межа, бо глобальних атрибутів максимум кілька десятків
+
+        while page <= MAX_PAGES:
+            response = wcapi.get("products/attributes", params={"per_page": 100, "page": page})
+            logging.info(f"➡️ Отримано сторінку {page} (статус {response.status_code})")
+
+            if response.status_code != 200:
+                logging.error(f"❌ Помилка при запиті до WooCommerce API: {response.status_code} - {response.text}")
+                break
+
+            data = response.json()
+            if not data:
+                logging.info("📭 Більше сторінок немає — завершую запит.")
+                break
+
+            all_attributes.extend(data)
+            if len(data) < 100:
+                break  # менше 100 — значить, остання сторінка
+            page += 1
+
+        if not all_attributes:
+            logging.warning("⚠️ Глобальні атрибути не знайдено.")
+            return
+
+        logging.info("🧩 --- Глобальні атрибути WooCommerce ---")
+        for attr in all_attributes:
+            attr_id = attr.get("id")
+            name = attr.get("name")
+            slug = attr.get("slug")
+            type_ = attr.get("type")
+            orderby = attr.get("order_by")
+            logging.info(f"ID={attr_id:>3} | slug={slug:<20} | name={name:<25} | type={type_} | orderby={orderby}")
+
+        logging.info(f"✅ Всього знайдено {len(all_attributes)} глобальних атрибутів.")
+
+    except Exception as e:
+        logging.error(f"❌ Помилка при отриманні списку атрибутів: {e}", exc_info=True)
+
+
+# --- КОНВЕРТАЦІЯ ЛОКАЛЬНИХ АТРИБУТІВ У ГЛОБАЛЬНІ ---
+def convert_local_attributes_to_global():
+    """
+    Пакетна конвертація локальних атрибутів у глобальні
+    для товарів, створених після 1 вересня 2025 року.
+    """
+    from datetime import datetime
+    import re
+
+    log_message_to_existing_file()
+    logging.info("🚀 Початок пакетної конвертації локальних атрибутів у глобальні для останніх товарів...")
+
+    settings = load_settings()
+    if not settings:
+        logging.critical("❌ Не вдалося завантажити налаштування.")
+        return
+
+    wcapi = get_wc_api(settings)
+    if not wcapi:
+        logging.critical("❌ Не вдалося підключитися до WooCommerce API.")
+        return
+
+    global_attr_map = settings.get("global_attr_map", {})
+    numeric_attrs = ["pa_diameter", "pa_length", "pa_height"]
+    cutoff_date = datetime(2025, 9, 1)
+
+    def _smart_split_attr(attr_name, val):
+        if not val:
+            return []
+        if attr_name in numeric_attrs:
+            parts = [p.strip() for p in re.split(r'[|;,]', val) if p.strip()]
+            return [",".join(parts)]
+        else:
+            parts = [p.strip() for p in re.split(r'[|;,]', val) if p.strip()]
+            return parts
+
+    try:
+        # Отримуємо всі товари після cutoff_date (постаємо у сторінках по 100)
+        page = 1
+        per_page = 10
+        total_checked = 0
+        total_updated = 0
+
+        while True:
+            response = wcapi.get("products", params={
+                "per_page": per_page,
+                "page": page,
+                "after": cutoff_date.isoformat(),
+                "orderby": "date",
+                "order": "asc"
+            })
+            if response.status_code != 200:
+                logging.error(f"❌ Не вдалося отримати товари: {response.text}")
+                break
+
+            products = response.json()
+            if not products:
+                break  # кінець списку
+
+            for product in products:
+                product_id = product["id"]
+                product_name = product.get("name", "")
+                attributes = product.get("attributes", [])
+                local_attrs = []
+                global_attrs = []
+
+                for attr in attributes:
+                    attr_name = attr.get("name")
+                    attr_id = attr.get("id")
+                    if attr_id and attr_id in global_attr_map.values():
+                        global_attrs.append(attr)
+                    else:
+                        local_attrs.append(attr)
+
+                logging.info(f"Товар ID={product_id}, Name='{product_name}': {len(global_attrs)} глобальних, {len(local_attrs)} локальних атрибутів")
+
+                if not local_attrs:
+                    total_checked += 1
+                    continue
+
+                # Конвертація локальних у глобальні
+                changes = 0
+                for attr in local_attrs:
+                    name = attr.get("name")
+                    value = "|".join(attr.get("options", []))
+                    attr["options"] = _smart_split_attr(name, value)
+                    if name in global_attr_map:
+                        attr["id"] = global_attr_map[name]
+                        changes += 1
+
+                if changes:
+                    product_data = {"id": product_id, "attributes": attributes}
+                    resp_update = wcapi.put(f"products/{product_id}", product_data)
+                    if resp_update.status_code == 200:
+                        logging.info(f"✅ Оновлено {changes} атрибутів для SKU={product.get('sku','')} / ID={product_id}")
+                        total_updated += changes
+                    else:
+                        logging.error(f"❌ Не вдалося оновити товар ID={product_id}: {resp_update.text}")
+
+                total_checked += 1
+
+            page += 1
+
+        logging.info(f"--- 🏁 Підсумок ---")
+        logging.info(f"Всього перевірено товарів: {total_checked}")
+        logging.info(f"Всього оновлено атрибутів: {total_updated}")
+
+    except Exception as e:
+        logging.error(f"❌ Критична помилка: {e}", exc_info=True)

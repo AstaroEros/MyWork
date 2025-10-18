@@ -10,13 +10,13 @@ from bs4 import BeautifulSoup
 import random 
 from PIL import Image
 import logging
-import mysql.connector
+import html
 from typing import Dict, Tuple, List, Optional, Any
 from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log_message_to_existing_file, load_attributes_csv, \
                                 save_attributes_csv, load_category_csv, save_category_csv, load_poznachky_csv, \
                                 _process_batch_update, find_media_ids_for_sku, _process_batch_create, clear_directory, \
                                 download_product_images, move_gifs, convert_to_webp_square, sync_webp_column, copy_to_site, \
-                                translate_text_deepl, get_deepl_usage
+                                translate_text_deepl, get_deepl_usage, fill_wpml_translation_group
 from datetime import datetime, timedelta
 
 
@@ -1227,28 +1227,12 @@ def create_new_products_import_file():
 def update_existing_products_batch():
     """
     Оновлює існуючі товари у WooCommerce на основі CSV-файлу old_prod_new_SHK.csv.
-
-    Функціонал:
-    1. Зчитує налаштування та підключається до WooCommerce API.
-    2. Читає CSV та формує список товарів для пакетного оновлення.
-    3. Для кожного товару:
-       - Перевіряє ID
-       - Збирає стандартні поля (sku, post_date, product_type, tax_status)
-       - Формує meta_data (ACF, Rank Math)
-       - Обробляє атрибути:
-            * зберігає старі атрибути, яких немає в CSV
-            * оновлює існуючі та додає нові
-            * глобальний атрибут pa_manufacturer прив'язується до WooCommerce
-       - Оновлює теги (tags)
-       - Оновлює excerpt та content
-    4. Надсилає товари пакетами по BATCH_SIZE.
-    5. Логує результат та помилки.
+    Використовує глобальні атрибути WooCommerce із global_attr_map.
     """
 
     log_message_to_existing_file()
     logging.info("ФУНКЦІЯ 11. Починаю пакетне оновлення існуючих товарів з old_prod_new_SHK.csv...")
 
-    # --- Завантаження налаштувань ---
     settings = load_settings()
     if not settings:
         logging.critical("❌ Не вдалося завантажити налаштування.")
@@ -1256,17 +1240,16 @@ def update_existing_products_batch():
 
     try:
         csv_path = settings['paths']['csv_path_sl_old_prod_new_shk']
+        global_attr_map = settings.get('global_attr_map', {})
     except KeyError:
         logging.error("❌ Не знайдено шлях до CSV у налаштуваннях.")
         return
 
-    # --- Підключення до WooCommerce API ---
     wcapi = get_wc_api(settings)
     if not wcapi:
         logging.critical("❌ Не вдалося створити об'єкт WooCommerce API.")
         return
 
-    # --- Параметри пакетного оновлення ---
     BATCH_SIZE = 5
     products_to_update = []
     total_products_read = 0
@@ -1279,16 +1262,11 @@ def update_existing_products_batch():
         with open(csv_path, mode='r', encoding='utf-8') as f:
             reader = csv.reader(f)
             headers = next(reader)
-            logging.info(f"Зчитано {len(headers)} заголовків: {', '.join(headers[:5])}...")
-            logging.info(f"⏳ Відправка пакету з {len(products_to_update)} товарів...")
-            payload = {"update": products_to_update}
-            response = wcapi.post("products/batch", data=payload)
+            field_map = {header: idx for idx, header in enumerate(headers)}
 
-            start_batch = time.time()
             STANDARD_FIELDS = ['sku', 'post_date', 'product_type', 'tax_status']
             ACF_PREFIX = 'Мета: '
             ATTRIBUTE_PREFIX = 'attribute:'
-            field_map = {header: idx for idx, header in enumerate(headers)}
 
             for row in reader:
                 total_products_read += 1
@@ -1338,16 +1316,17 @@ def update_existing_products_batch():
                         tag_names = [t.strip() for t in value.split(',') if t.strip()]
                         tags.extend([{"name": t} for t in tag_names])
 
-                    # --- Не додаю Короткий та повний опис ---
-                    # elif key == 'excerpt':
-                    #    product_data['excerpt'] = value
-                    # elif key == 'content':
-                    #    product_data['description'] = value  # WooCommerce API
-
                     # --- Атрибути ---
                     elif key.startswith(ATTRIBUTE_PREFIX):
                         attr_name = key.replace(ATTRIBUTE_PREFIX, '')
-                        options = [v.strip() for v in value.split(',') if v.strip()]
+                        import re
+                        # Розумний спліт, щоб числа з комою не розривалися
+                        def _smart_split(val):
+                            if not val:
+                                return []
+                            parts = [p.strip() for p in re.split(r'[;,|]', val) if p.strip()]
+                            return parts
+                        options = _smart_split(value)
                         if options:
                             attr_dict = {
                                 "name": attr_name,
@@ -1356,25 +1335,21 @@ def update_existing_products_batch():
                                 "variation": False,
                                 "options": options
                             }
-                            # Глобальний атрибут manufacturer
-                            if attr_name == "pa_manufacturer":
-                                attr_dict["id"] = 1  # ID глобального атрибута manufacturer у WooCommerce
+                            # Використовуємо глобальний атрибут, якщо він є
+                            if attr_name in global_attr_map:
+                                attr_dict["id"] = global_attr_map[attr_name]
                             new_attributes.append(attr_dict)
 
-                # --- Додаємо meta_data та теги до product_data ---
                 if meta_data:
                     product_data['meta_data'] = meta_data
                 if tags:
                     product_data['tags'] = tags
 
-                # --- Обробка атрибутів: merge з існуючими ---
+                # --- Merge атрибутів з існуючими ---
                 if new_attributes:
                     try:
-                        # Отримуємо існуючі атрибути товару
                         existing_attributes = wcapi.get(f"products/{product_id}").json().get("attributes", [])
                         attr_map = {attr['name']: attr for attr in existing_attributes}
-
-                        # Оновлюємо існуючі або додаємо нові
                         for new_attr in new_attributes:
                             name = new_attr['name']
                             if name in attr_map:
@@ -1386,34 +1361,19 @@ def update_existing_products_batch():
                                     attr_map[name]['id'] = new_attr['id']
                             else:
                                 attr_map[name] = new_attr
-
                         product_data['attributes'] = list(attr_map.values())
                     except Exception as e:
                         logging.error(f"Рядок {total_products_read}: Помилка merge атрибутів: {e}")
 
                 products_to_update.append(product_data)
 
-                # --- Надсилання пакету на оновлення ---
                 if len(products_to_update) >= BATCH_SIZE:
-                    current_batch = (total_products_read // BATCH_SIZE)
-                    logging.info(
-                        f"⏳ Відправка пакету {current_batch} — "
-                        f"{len(products_to_update)} товарів "
-                        f"(всього оновлено: {total_updated} з {total_products_read})"
-                    )
-
                     total_updated += _process_batch_update(wcapi, products_to_update, errors_list)
                     products_to_update = []
-            logging.info(f"✅ Відповідь отримано за {int(time.time() - start_batch)} сек.")
-            # --- Обробка залишку ---
+
             if products_to_update:
-                current_batch = (total_products_read // BATCH_SIZE) + 1
-                logging.info(
-                    f"⏳ Відправка фінального пакету {current_batch} — "
-                    f"{len(products_to_update)} товарів "
-                    f"(всього оновлено: {total_updated} з {total_products_read})"
-                )
                 total_updated += _process_batch_update(wcapi, products_to_update, errors_list)
+
     except Exception as e:
         logging.critical(f"❌ Критична помилка при обробці CSV: {e}", exc_info=True)
         return
@@ -1434,7 +1394,8 @@ def update_existing_products_batch():
         logging.info("✅ Оновлення завершено без помилок.")
 
 def create_new_products_batch():
-    """Пакетне створення нових товарів у WooCommerce з CSV."""
+    """Пакетне створення нових товарів у WooCommerce з CSV (використовує глобальні атрибути)."""
+
     log_message_to_existing_file()
     logging.info("🚀 Починаю пакетне СТВОРЕННЯ нових товарів з SL_new_prod.csv...")
 
@@ -1446,6 +1407,7 @@ def create_new_products_batch():
     try:
         csv_path = settings['paths']['csv_path_sl_new_prod']
         uploads_path = '/var/www/html/erosinua/public_html/wp-content/uploads/products'
+        global_attr_map = settings.get('global_attr_map', {})
     except KeyError as e:
         logging.error(f"❌ Не знайдено шлях до CSV або uploads_path: {e}")
         return
@@ -1455,12 +1417,41 @@ def create_new_products_batch():
         logging.critical("❌ Не вдалося створити об'єкт WooCommerce API.")
         return
 
+# --- Завантаження локального списку категорій ---
+    categories_map = {}
+    try:
+        cat_path = settings['paths'].get('product_categories')
+        if cat_path and os.path.exists(cat_path):
+            with open(cat_path, mode='r', encoding='utf-8') as cat_file:
+                reader = csv.DictReader(cat_file)
+                
+                # Додаємо логування перших кількох категорій, як вони обробляються
+                log_count = 0
+                for row in reader:
+                    name = row.get('name', '').strip().lower() # Тільки видаляємо пробіли і переводимо в нижній регістр
+                    term_id = row.get('term_id', '').strip()
+                    if name and term_id.isdigit():
+                        categories_map[name] = int(term_id)
+                        
+                        # НОВЕ ЛОГУВАННЯ 1: Показуємо, що ми додали до мапи
+                        if log_count < 5:
+                             logging.debug(f"🔍 [MAP] Додано категорію: '{name}' -> ID: {term_id}")
+                             log_count += 1
+
+            logging.info(f"✅ Завантажено {len(categories_map)} категорій з {cat_path}")
+        else:
+            logging.warning("⚠️ Файл категорій не знайдено або шлях порожній.")
+    except Exception as e:
+        logging.error(f"❌ Помилка при завантаженні категорій: {e}")
+        categories_map = {}
+
+    # --- Ініціалізація ---
     BATCH_SIZE = 50
-    products_to_create: List[Dict[str, Any]] = []
+    products_to_create = []
     total_products_read = 0
     total_created = 0
     total_skipped = 0
-    errors_list: List[str] = []
+    errors_list = []
     start_time = time.time()
 
     STANDARD_FIELDS = ['sku', 'post_date', 'excerpt', 'content', 'product_type']
@@ -1483,11 +1474,11 @@ def create_new_products_batch():
                     total_skipped += 1
                     continue
 
-                product_data: Dict[str, Any] = {"sku": sku, "name": name, "status": "draft"}
-                meta_data: List[Dict[str, Any]] = []
-                attributes: List[Dict[str, Any]] = []
-                tags: List[Dict[str, Any]] = []
-                images: List[Dict[str, Any]] = []
+                product_data = {"sku": sku, "name": name, "status": "draft"}
+                meta_data = []
+                attributes = []
+                tags = []
+                images = []
 
                 for key, index in field_map.items():
                     if index >= len(row):
@@ -1506,51 +1497,17 @@ def create_new_products_batch():
                             product_data['description'] = value
                         elif key == 'post_date':
                             product_data['date_created'] = value
+
                     # --- meta_data ---
                     elif key.startswith(ACF_PREFIX):
                         meta_data.append({"key": key.replace(ACF_PREFIX, ''), "value": value})
                     elif key == 'rank_math_focus_keyword':
                         meta_data.append({"key": key, "value": value})
+
                     # --- атрибути ---
                     elif key.startswith(ATTRIBUTE_PREFIX):
                         attr_name = key.replace(ATTRIBUTE_PREFIX, '')
-
-                        # Розумне розділення опцій: перевага для ', ' (кома + пробіл),
-                        # потім ';' або '|' як роздільники, і як останній варіант —
-                        # розбити по ',' та з'єднати сусідні числові фрагменти (['15','0'] -> '15,0').
-                        import re
-
-                        def _smart_split_attr(val: str) -> list:
-                            if not val:
-                                return []
-                            # 1) split on comma+space (зазвичай для списків: "a, b, c" або файлів "file1, file2")
-                            parts = [p.strip() for p in re.split(r',\s+', val) if p.strip()]
-                            if len(parts) > 1:
-                                return parts
-                            # 2) try semicolon or pipe
-                            if ';' in val:
-                                return [p.strip() for p in val.split(';') if p.strip()]
-                            if '|' in val:
-                                return [p.strip() for p in val.split('|') if p.strip()]
-                            # 3) fallback: split on comma and rejoin numeric neighbour fragments (15,0)
-                            if ',' in val:
-                                temp = [p.strip() for p in val.split(',') if p.strip()]
-                                reconstructed = []
-                                i = 0
-                                while i < len(temp):
-                                    if i + 1 < len(temp) and re.fullmatch(r'\d+', temp[i]) and re.fullmatch(r'\d+', temp[i+1]):
-                                        # Об'єднуємо сусідні цифрові фрагменти назад в десяткове з комою
-                                        reconstructed.append(temp[i] + ',' + temp[i+1])
-                                        i += 2
-                                    else:
-                                        reconstructed.append(temp[i])
-                                        i += 1
-                                return reconstructed
-                            # default — одне значення
-                            return [val.strip()]
-
-                        options = _smart_split_attr(value)
-
+                        options = [v.strip() for v in re.split(r'[;,|]', value) if v.strip()]
                         if options:
                             attr = {
                                 "name": attr_name,
@@ -1559,21 +1516,31 @@ def create_new_products_batch():
                                 "variation": False,
                                 "options": options
                             }
-                            if attr_name == "pa_manufacturer":
-                                attr["id"] = 1
+                            if attr_name in global_attr_map:
+                                attr["id"] = global_attr_map[attr_name]
                             attributes.append(attr)
+
                     # --- категорії ---
                     elif key == 'categories':
-                        category_names = [c.strip() for c in value.split('|') if c.strip()]
-                        if category_names:
-                            product_data['categories'] = [{"name": c} for c in category_names]
+                        category_names = [c.strip().lower() for c in value.split('|') if c.strip()]
+                        category_ids = []
+                        for c in category_names:
+                            if c in categories_map:
+                                category_ids.append({"id": categories_map[c]})
+                            else:
+                                logging.warning(f"⚠️ Категорія '{c}' не знайдена у локальному файлі категорій.")
+                        if category_ids:
+                            product_data['categories'] = category_ids
+
                     # --- теги ---
                     elif key == 'Позначки':
                         tags.extend([{"name": t.strip()} for t in value.split(',') if t.strip()])
+
                     # --- зображення ---
                     elif key == 'image_name':
                         images = find_media_ids_for_sku(wcapi, sku, uploads_path)
-                    # --- ціна, запаси, оподаткування, статус ---
+
+                    # --- ціна, запаси, статус ---
                     elif key == 'regular_price':
                         product_data['regular_price'] = str(value)
                     elif key == 'manage_stock':
@@ -1585,7 +1552,6 @@ def create_new_products_batch():
                     else:
                         product_data[key] = value
 
-                # --- додавання списків у product_data ---
                 if meta_data:
                     product_data['meta_data'] = meta_data
                 if attributes:
@@ -1597,12 +1563,10 @@ def create_new_products_batch():
 
                 products_to_create.append(product_data)
 
-                # --- пакетна відправка ---
                 if len(products_to_create) >= BATCH_SIZE:
                     total_created += _process_batch_create(wcapi, products_to_create, errors_list)
                     products_to_create = []
 
-            # --- обробка залишку ---
             if products_to_create:
                 total_created += _process_batch_create(wcapi, products_to_create, errors_list)
 
@@ -1613,7 +1577,6 @@ def create_new_products_batch():
         logging.critical(f"❌ Критична помилка при читанні CSV: {e}", exc_info=True)
         return
 
-    # --- підсумок ---
     elapsed_time = int(time.time() - start_time)
     logging.info("--- 🏁 Підсумок створення нових товарів ---")
     logging.info(f"Всього прочитано рядків: {total_products_read}")
@@ -1622,7 +1585,7 @@ def create_new_products_batch():
     logging.info(f"Загальна тривалість: {elapsed_time} сек.")
 
     if errors_list:
-        logging.warning(f"⚠️ Знайдено {len(errors_list)} помилок/пропусків. Перші 5 помилок:")
+        logging.warning(f"⚠️ Знайдено {len(errors_list)} помилок/пропусків. Перші 5:")
         for error in errors_list[:5]:
             logging.warning(f"-> {error}")
     else:
@@ -1630,15 +1593,11 @@ def create_new_products_batch():
 
 def update_image_seo_from_csv():
     """
-    Оновлює SEO-атрибути зображень всіх товарів, що знаходяться у csv_path_sl_new_prod.
-    Використовує шаблон тегів з seo_tag та WooCommerce + WP REST API для оновлення.
+    Оновлює SEO-атрибути зображень українських товарів з файлу csv_path_sl_new_prod.
+    Логування у стилі upload_ru_translation_to_wp().
     """
-    import os, csv, logging, requests
-    from scr.base_function import load_settings, get_wc_api
-    from typing import List, Dict, Any
-
-    logging.basicConfig(level=logging.INFO)
-    print("🖼️ Починаю оновлення SEO-атрибутів для товарів із CSV...")
+    log_message_to_existing_file()
+    logging.info("🚀 Початок оновлення SEO-атрибутів (UA) для товарів із CSV...")
 
     settings = load_settings()
     if not settings:
@@ -1664,16 +1623,18 @@ def update_image_seo_from_csv():
         return
 
     # --- Отримуємо список SKU з CSV ---
-    skus: List[Dict[str, str]] = []
+    skus = []
     try:
         with open(csv_path, mode='r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
-            for row in reader:
+            for idx, row in enumerate(reader, start=2):
                 sku = row.get('sku') or row.get('SKU')
-                category = row.get('categories') or row.get('Категорія')
-                name = row.get('name') or row.get('Назва')
-                if sku:
-                    skus.append({"sku": sku.strip(), "category": category.strip() if category else "", "name": name.strip() if name else ""})
+                category = row.get('categories') or row.get('Категорія') or ""
+                name = row.get('name') or row.get('Назва') or ""
+                if not sku:
+                    logging.warning(f"Рядок {idx}: пропущено через відсутній SKU")
+                    continue
+                skus.append({"sku": sku.strip(), "category": category.strip(), "name": name.strip(), "row_idx": idx})
     except Exception as e:
         logging.critical(f"❌ Не вдалося прочитати CSV: {e}")
         return
@@ -1696,8 +1657,9 @@ def update_image_seo_from_csv():
         sku = item["sku"]
         product_name = item["name"]
         category = item["category"]
+        idx = item["row_idx"]
 
-        # Визначаємо SEO-дані по категорії
+        # --- Формуємо SEO-теги для товару ---
         seo_row = seo_tags_map.get(category)
         if seo_row:
             alt = seo_row.get("alt_ukr", "").replace("{product_name}", product_name)
@@ -1710,63 +1672,90 @@ def update_image_seo_from_csv():
             description = f"{product_name} купити в інтернет-магазині Eros.in.ua."
             title = product_name
 
+        # --- Отримуємо товар з WooCommerce ---
         try:
-            resp = wcapi.get("products", params={"sku": sku})
+            resp = wcapi.get("products", params={"sku": sku, "lang": "uk"})
             if resp.status_code != 200 or not resp.json():
-                logging.warning(f"❌ Товар зі SKU {sku} не знайдено або помилка GET.")
+                logging.warning(f"Рядок {idx}, SKU {sku}: товар не знайдено або помилка GET.")
                 failed_count += 1
                 continue
             product = resp.json()[0]
         except Exception as e:
-            logging.error(f"❌ Помилка WooCommerce GET для SKU {sku}: {e}")
+            logging.error(f"Рядок {idx}, SKU {sku}: WooCommerce GET exception: {e}")
             failed_count += 1
             continue
 
         product_id = product.get("id")
-        images: List[Dict[str, Any]] = product.get("images", [])
+        images = product.get("images", [])
+
+        if not images:
+            logging.warning(f"Рядок {idx}, SKU {sku}: товар не має зображень")
+            failed_count += 1
+            continue
 
         wc_images_update = []
+
+        # --- Оновлення кожного зображення ---
         for img in images:
             img_id = img.get("id")
             src = img.get("src")
+
             if not img_id and src and wp_login and wp_pass:
-                # Спроба знайти через WP REST API по filename
                 filename = os.path.basename(src)
-                media_search = requests.get(f"{base_url}/wp-json/wp/v2/media", params={"search": filename}, auth=(wp_login, wp_pass))
-                if media_search.status_code == 200 and media_search.json():
-                    img_id = media_search.json()[0].get("id")
+                try:
+                    media_search = requests.get(
+                        f"{base_url}/wp-json/wp/v2/media",
+                        params={"search": filename},
+                        auth=(wp_login, wp_pass)
+                    )
+                    if media_search.status_code == 200 and media_search.json():
+                        img_id = media_search.json()[0].get("id")
+                except Exception as e:
+                    logging.warning(f"Рядок {idx}, SKU {sku}: не вдалося знайти медіа через WP API: {e}")
 
             if img_id:
-                wc_images_update.append({"id": img_id, "alt": alt, "name": title})
+                # --- Декодуємо HTML спеціальні символи в тайтлі ---
+                safe_title = html.unescape(title)
 
-                # Оновлення caption/description через WP REST API
+                wc_images_update.append({"id": img_id, "alt": alt, "name": safe_title})
+
+                # --- Оновлення caption/description через WP REST API ---
                 if wp_login and wp_pass:
                     try:
                         media_endpoint = f"{base_url}/wp-json/wp/v2/media/{img_id}"
-                        requests.put(media_endpoint, auth=(wp_login, wp_pass),
-                                     json={"title": title, "alt_text": alt, "caption": caption, "description": description})
+                        requests.put(
+                            media_endpoint,
+                            auth=(wp_login, wp_pass),
+                            json={
+                                "title": safe_title,
+                                "alt_text": alt,
+                                "caption": caption,
+                                "description": description
+                            }
+                        )
                     except Exception as e:
-                        logging.warning(f"❌ Не вдалося оновити WP media для img_id {img_id}: {e}")
+                        logging.warning(f"Рядок {idx}, SKU {sku}, img_id {img_id}: не вдалося оновити WP media: {e}")
 
+        # --- Оновлення через WooCommerce PUT ---
         if wc_images_update and product_id:
             try:
                 resp_put = wcapi.put(f"products/{product_id}", {"images": wc_images_update})
                 if resp_put.status_code == 200:
+                    logging.info(f"Рядок {idx}, SKU {sku}: успішно оновлено {len(wc_images_update)} зображень")
                     updated_count += len(wc_images_update)
                 else:
-                    logging.warning(f"❌ WooCommerce PUT для SKU {sku} не успішний: {resp_put.status_code}")
+                    logging.warning(f"Рядок {idx}, SKU {sku}: WooCommerce PUT неуспішний: {resp_put.status_code}")
                     failed_count += len(wc_images_update)
             except Exception as e:
-                logging.error(f"❌ WooCommerce PUT exception для SKU {sku}: {e}")
+                logging.error(f"Рядок {idx}, SKU {sku}: WooCommerce PUT exception: {e}")
                 failed_count += len(wc_images_update)
 
-    print(f"🎯 Оновлення завершено. Успішно оновлено: {updated_count}, не вдалося: {failed_count}.")
-
+    logging.info(f"🎯 Оновлення SEO (UA) завершено. Успішно оновлено: {updated_count}, не вдалося: {failed_count}.")
 
 def translate_and_prepare_new_prod_csv():
     """
     Створює новий RU CSV на основі UA:
-    - переклад name → Title, content → Content, excerpt → Excerpt
+    - переклад name → Title_ru, content → Content_ru, excerpt → Excerpt_ru
     - rank_math_focus_keyword та categories копіюються
     - WPML Translation ID підтягнуто зі старого перекладу
     - решта полів заповнюються з існуючого RU CSV або залишаються порожніми
@@ -1807,12 +1796,12 @@ def translate_and_prepare_new_prod_csv():
 
             reader = csv.DictReader(f_in)
             output_headers = [
-                "Sku","Title","Content","Excerpt","Date","categories","Post Type","Permalink","WPML Translation ID",
+                "Sku","Title_ru","Content_ru","Excerpt_ru","Date","categories","Post Type","Permalink","WPML Translation ID",
                 "WPML Language Code","Parent Product ID","_wpml_import_language_code","_wpml_import_source_language_code",
                 "_wpml_import_translation_group","Price","Regular Price","Sale Price","Stock Status","Stock",
-                "External Product URL","Total Sales","Product Type","Shipping Class","Product Visibility",
-                "Image URL","Image Filename","Image Path","Image ID","Image Title","Image Caption","Image Description",
-                "Image Alt Text","Image Featured","Бренди","Категорії товарів","Product Tags","Translation Priorities",
+                "External Product URL","Total Sales","Product Type","Shipping Class","Product Visibility","Image URL",
+                "Image Filename","Image Path","Image ID","Image Title","Image Caption","Image Description","Image Alt Text",
+                "Image Featured","Бренди","Категорії товарів","Product Tags","Translation Priorities",
                 "rank_math_internal_links_processed","_low_stock_amount","rank_math_focus_keyword"
             ]
             writer = csv.DictWriter(f_out, fieldnames=output_headers)
@@ -1827,10 +1816,10 @@ def translate_and_prepare_new_prod_csv():
                 new_row = {col: "" for col in output_headers}
                 new_row["Sku"] = sku
 
-                # 🔹 Переклади
-                new_row["Title"] = translate_text_deepl(row.get("name", "").strip(), "RU", api_key, api_url)
-                new_row["Content"] = translate_text_deepl(row.get("content", "").strip(), "RU", api_key, api_url)
-                new_row["Excerpt"] = translate_text_deepl(row.get("excerpt", "").strip(), "RU", api_key, api_url)
+                # 🔹 Переклади у нові колонки
+                new_row["Title_ru"] = translate_text_deepl(row.get("name", "").strip(), "RU", api_key, api_url)
+                new_row["Content_ru"] = translate_text_deepl(row.get("content", "").strip(), "RU", api_key, api_url)
+                new_row["Excerpt_ru"] = translate_text_deepl(row.get("excerpt", "").strip(), "RU", api_key, api_url)
 
                 # 🔹 Копіювання без перекладу
                 new_row["rank_math_focus_keyword"] = row.get("rank_math_focus_keyword", "")
@@ -1841,9 +1830,13 @@ def translate_and_prepare_new_prod_csv():
                 new_row["WPML Language Code"] = "ru"
                 new_row["WPML Translation ID"] = ru_row.get("WPML Translation ID", "")
 
+                # 🔹 Встановлюємо мови для імпорту
+                new_row["_wpml_import_language_code"] = "ru"
+                new_row["_wpml_import_source_language_code"] = "uk"
+
                 # 🔹 Підтягуємо решту полів
                 for key, value in ru_row.items():
-                    if key in output_headers and key not in ["Sku","Title","Content","Excerpt","categories","rank_math_focus_keyword","WPML Language Code","WPML Translation ID"]:
+                    if key in output_headers and key not in ["Sku","Title_ru","Content_ru","Excerpt_ru","categories","rank_math_focus_keyword","WPML Language Code","WPML Translation ID"]:
                         new_row[key] = value
 
                 writer.writerow(new_row)
@@ -1851,98 +1844,16 @@ def translate_and_prepare_new_prod_csv():
 
         logging.info(f"🎯 Готово! Файл збережено: {output_path}")
 
+        # 🔹 Підтягуємо _wpml_import_translation_group
+        logging.info("🔄 Оновлюємо колонку _wpml_import_translation_group...")
+        fill_wpml_translation_group()
+        logging.info("🏁 Оновлення _wpml_import_translation_group завершено.")
+
         # 🔸 Перевіряємо залишок символів після завершення
         get_deepl_usage(api_key)
 
     except Exception as e:
         logging.error(f"❌ Помилка під час формування CSV: {e}")
-
-def fill_wpml_translation_group():
-    """
-    Шукає trid (_wpml_import_translation_group) у базі WordPress
-    за SKU і оновлює цей самий CSV-файл (без створення копії).
-    """
-    log_message_to_existing_file()
-    logging.info("🚀 Початок оновлення колонки _wpml_import_translation_group")
-
-    settings = load_settings()
-    csv_path = settings["paths"].get("csv_path_sl_new_prod_ru")
-    db_conf = settings.get("db")
-
-    # 🔹 Перевірка конфігурації
-    if not db_conf:
-        logging.error("❌ У settings.json відсутній розділ 'db' з параметрами бази даних")
-        return
-
-    # 🔹 Підключення до MySQL
-    conn = mysql.connector.connect(
-        host=db_conf["host"],
-        user=db_conf["user"],
-        password=db_conf["password"],
-        database=db_conf["database"],
-        charset="utf8mb4"
-    )
-    cursor = conn.cursor(dictionary=True)
-
-    # 🔹 Зчитуємо усі рядки з файлу
-    with open(csv_path, "r", encoding="utf-8") as infile:
-        reader = csv.DictReader(infile)
-        rows = list(reader)
-        fieldnames = reader.fieldnames
-        if "_wpml_import_translation_group" not in fieldnames:
-            fieldnames.append("_wpml_import_translation_group")
-
-    logging.info("🚀 Початок пошуку trid для кожного SKU...")
-
-    # 🔹 Обробка кожного SKU
-    for idx, row in enumerate(rows, start=2):
-        sku = row.get("Sku")
-        if not sku:
-            logging.warning(f"Рядок {idx}: пропущено через відсутній SKU")
-            continue
-
-        # Знайти product_id за SKU
-        cursor.execute("""
-            SELECT pm.post_id
-            FROM wp_postmeta pm
-            JOIN wp_posts p ON p.ID = pm.post_id
-            WHERE pm.meta_key = '_sku' AND pm.meta_value = %s AND p.post_type = 'product'
-            LIMIT 1;
-        """, (sku,))
-        res = cursor.fetchone()
-
-        if not res:
-            logging.warning(f"⚠️ SKU {sku}: товар не знайдено у базі")
-            continue
-
-        product_id = res["post_id"]
-
-        # Знайти trid
-        cursor.execute("""
-            SELECT trid
-            FROM wp_icl_translations
-            WHERE element_type = 'post_product' AND element_id = %s
-            LIMIT 1;
-        """, (product_id,))
-        trid_res = cursor.fetchone()
-
-        if trid_res:
-            trid = trid_res["trid"]
-            row["_wpml_import_translation_group"] = trid
-            logging.info(f"✅ SKU {sku}: знайдено trid = {trid}")
-        else:
-            logging.warning(f"⚠️ SKU {sku}: не знайдено trid у wp_icl_translations")
-
-    # 🔹 Записуємо назад у той самий файл
-    with open(csv_path, "w", encoding="utf-8", newline="") as outfile:
-        writer = csv.DictWriter(outfile, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-    cursor.close()
-    conn.close()
-
-    logging.info(f"🏁 Оновлення завершено. Дані збережено у {csv_path}")
 
 def upload_ru_translation_to_wp():
     """
@@ -2055,3 +1966,154 @@ def upload_ru_translation_to_wp():
 
     except Exception as e:
         logging.error(f"❌ Помилка під час імпорту перекладів: {e}")
+
+def update_image_seo_ru_from_csv():
+    """
+    Костиль. Потрібно оновлювати всі зображення, але функція затирає українські теги.
+    Оновлює SEO-атрибути тільки першого (головного) зображення
+    російських товарів у csv_path_sl_new_prod_ru.
+    Логування виконано у стилі upload_ru_translation_to_wp().
+    """
+    log_message_to_existing_file()
+    logging.info("🚀 Початок оновлення SEO-атрибутів (RU) тільки для головних зображень...")
+
+    settings = load_settings()
+    if not settings:
+        logging.critical("❌ Не вдалося завантажити налаштування.")
+        return
+
+    csv_path = settings["paths"].get("csv_path_sl_new_prod_ru")
+    seo_tag_path = settings["paths"].get("seo_tag")
+    if not csv_path or not seo_tag_path:
+        logging.critical("❌ Не вказані шляхи до CSV або seo_tag у settings.json.")
+        return
+
+    # --- Завантажуємо шаблон тегів ---
+    seo_tags_map = {}
+    try:
+        with open(seo_tag_path, mode='r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                category = row['category'].strip()
+                seo_tags_map[category] = row
+    except Exception as e:
+        logging.critical(f"❌ Не вдалося завантажити файл SEO тегів: {e}")
+        return
+
+    # --- Отримуємо список SKU ---
+    skus = []
+    try:
+        with open(csv_path, mode='r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for idx, row in enumerate(reader, start=2):
+                sku = row.get('Sku') or row.get('sku')
+                category = row.get('categories') or ""
+                name = row.get('Title_ru') or ""
+                if not sku:
+                    logging.warning(f"Рядок {idx}: пропущено (відсутній SKU)")
+                    continue
+                skus.append({"sku": sku.strip(), "category": category.strip(), "name": name.strip(), "row_idx": idx})
+    except Exception as e:
+        logging.critical(f"❌ Не вдалося прочитати CSV: {e}")
+        return
+
+    # --- Підключення до WooCommerce ---
+    try:
+        wcapi = get_wc_api(settings)
+    except Exception as e:
+        logging.critical(f"❌ Не вдалося створити об'єкт WooCommerce API: {e}")
+        return
+
+    base_url = settings.get("url", "").rstrip("/")
+    wp_login = settings.get("login")
+    wp_pass = settings.get("pass")
+
+    updated_count = 0
+    failed_count = 0
+
+    for item in skus:
+        sku = item["sku"]
+        product_name = item["name"]
+        category = item["category"]
+        idx = item["row_idx"]
+
+        # --- Формуємо SEO-дані ---
+        seo_row = seo_tags_map.get(category)
+        if seo_row:
+            alt = seo_row.get("alt_ru", "").replace("{product_name}", product_name)
+            caption = seo_row.get("caption_ru", "").replace("{product_name}", product_name)
+            description = seo_row.get("desc_ru", "").replace("{product_name}", product_name)
+            title = seo_row.get("name_ru", "").replace("{product_name}", product_name)
+        else:
+            alt = f"Купить {product_name} в секс-шопе Eros.in.ua"
+            caption = f"{product_name} – инновационная секс-игрушка"
+            description = f"{product_name} купить в интернет-магазине Eros.in.ua."
+            title = product_name
+
+        # --- Отримуємо товар ---
+        try:
+            resp = wcapi.get("products", params={"sku": sku, "lang": "ru"})
+            if resp.status_code != 200 or not resp.json():
+                logging.warning(f"Рядок {idx}, SKU {sku}: товар не знайдено або помилка GET ({resp.status_code})")
+                failed_count += 1
+                continue
+            product = resp.json()[0]
+        except Exception as e:
+            logging.error(f"Рядок {idx}, SKU {sku}: WooCommerce GET exception: {e}")
+            failed_count += 1
+            continue
+
+        product_id = product.get("id")
+        images = product.get("images", [])
+
+        if not images:
+            logging.warning(f"Рядок {idx}, SKU {sku}: товар не має зображень")
+            failed_count += 1
+            continue
+
+        # --- Беремо тільки перше (головне) зображення ---
+        main_image = images[0]
+        img_id = main_image.get("id")
+        src = main_image.get("src")
+
+        if not img_id and src and wp_login and wp_pass:
+            filename = os.path.basename(src)
+            try:
+                media_search = requests.get(
+                    f"{base_url}/wp-json/wp/v2/media",
+                    params={"search": filename},
+                    auth=(wp_login, wp_pass)
+                )
+                if media_search.status_code == 200 and media_search.json():
+                    img_id = media_search.json()[0].get("id")
+            except Exception as e:
+                logging.warning(f"Рядок {idx}, SKU {sku}: не вдалося знайти медіа через WP API: {e}")
+
+        # --- Оновлюємо лише головне зображення ---
+        if img_id:
+            try:
+                media_endpoint = f"{base_url}/wp-json/wp/v2/media/{img_id}"
+                wp_resp = requests.put(
+                    media_endpoint,
+                    auth=(wp_login, wp_pass),
+                    json={
+                        "title": title,
+                        "alt_text": alt,
+                        "caption": caption,
+                        "description": description
+                    }
+                )
+                if wp_resp.status_code == 200:
+                    logging.info(f"✅ Рядок {idx}, SKU {sku}: оновлено головне зображення (img_id {img_id})")
+                    updated_count += 1
+                else:
+                    logging.warning(f"⚠️ Рядок {idx}, SKU {sku}: WP PUT {wp_resp.status_code} — {wp_resp.text}")
+                    failed_count += 1
+            except Exception as e:
+                logging.warning(f"❌ Рядок {idx}, SKU {sku}, img_id {img_id}: помилка оновлення WP media: {e}")
+                failed_count += 1
+        else:
+            logging.warning(f"⚠️ Рядок {idx}, SKU {sku}: не знайдено ID головного зображення")
+            failed_count += 1
+
+    logging.info(f"🎯 Завершено. Оновлено головних зображень: {updated_count}, помилок: {failed_count}")

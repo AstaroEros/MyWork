@@ -1,5 +1,6 @@
 import argparse
-from scr.base_function import check_version, check_csv_data, export_product_by_id, update_image_seo_by_sku, translate_csv_to_ru
+from scr.base_function import check_version, check_csv_data, export_product_by_id, update_image_seo_by_sku, translate_csv_to_ru, \
+                        log_global_attributes, convert_local_attributes_to_global
 from scr.products import export_products, download_supplier_price_list, process_supplier_1_price_list, \
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
@@ -7,7 +8,7 @@ from scr.suppliers_1 import find_new_products, find_product_data, parse_product_
                         fill_product_category, refill_product_category, separate_existing_products, assign_new_sku_to_products, \
                         download_images_for_product, create_new_products_import_file, update_existing_products_batch, \
                         create_new_products_batch, update_image_seo_from_csv, translate_and_prepare_new_prod_csv, \
-                        upload_ru_translation_to_wp, fill_wpml_translation_group
+                        upload_ru_translation_to_wp, fill_wpml_translation_group, update_image_seo_ru_from_csv
 
 
 def main():
@@ -94,14 +95,14 @@ def main():
         help="Знайти URL, штрих-код та атрибути для нових товарів."
     )
 
-
+    # ✨ Додаємо новий аргумент для парсингу атрибутів
     parser.add_argument(
         "--parse-attributes",
         action="store_true",
         help="Парсити сторінки товарів для вилучення атрибутів."
     )
 
-    # === НОВИЙ АРГУМЕНТ для фінальної стандартизації ===
+    # ✨ НОВИЙ АРГУМЕНТ для фінальної стандартизації
     parser.add_argument(
         "--standardize-final",
         action="store_true",
@@ -136,13 +137,12 @@ def main():
     help="Знайти найбільший SKU у zalishki.csv та присвоїти послідовні SKU новим товарам у new.csv (колонка P/15)."
     )
 
-# ✨ НОВИЙ АРГУМЕНТ для комплексного завантаження зображень
+    # ✨ НОВИЙ АРГУМЕНТ для комплексного завантаження зображень
     parser.add_argument(
     "--download-images",
     action="store_true",
     help="Комплексний процес: Завантаження зображень з URL (B/1) у папки категорій (Q/16), перейменування за SKU (P/15), оновлення new.csv (R/17) та сортування GIF-файлів."
     )
-
 
     # ✨ НОВИЙ АРГУМЕНТ для створення файлу імпорту нових товарів
     parser.add_argument(
@@ -151,66 +151,84 @@ def main():
     help="Створює файл SL_new_prod.csv для імпорту нових товарів, очищуючи його та переносячи дані з new.csv."
     )
 
-
-    # --- НОВА КОМАНДА ДЛЯ ОНОВЛЕННЯ ІСНУЮЧИХ ТОВАРІВ ---
+    # ✨ НОВА КОМАНДА ДЛЯ ОНОВЛЕННЯ ІСНУЮЧИХ ТОВАРІВ
     parser.add_argument('--update-old-products', 
     action='store_true', 
     help='Завантажити дані з SL_old_prod_new_SHK.csv і оновити існуючі товари у базі.'
     )
     
-    # --- НОВА КОМАНДА ДЛЯ СТВОРЕННЯ НОВИХ ТОВАРІВ ---
+    # ✨ НОВА КОМАНДА ДЛЯ СТВОРЕННЯ НОВИХ ТОВАРІВ
     parser.add_argument('--create-new-products', 
         action='store_true', 
         help='Завантажити дані з SL_new_prod.csv і створити нові товари у базі.'
     )
-
+    # ✨ НОВА КОМАНДА ДЛЯ ПАРСИНГУ ВСІХ ДАНИХ ТОВАРУ ПО ЙОГО ID
     parser.add_argument("--export-product-by-id", 
         action="store_true", 
         help="Експорт усіх даних товару за ID у CSV"
     )
 
-
+    # ✨ НОВА КОМАНДА ДЛЯ ОНОВЛЕННЯ SEO-АТРИБУТІВ ЗОБРАЖЕНЬ
     parser.add_argument(
         "--update-image-seo",
         action="store_true",
         help="Оновити SEO-атрибути зображень за SKU."
     )
 
+    # ✨ НОВА КОМАНДА ДЛЯ ПЕРЕКЛАДУ CSV НА РОСІЙСЬКУ
     parser.add_argument(
         "--translate-ru",
         action="store_true",
         help="Перекласти CSV SL_new_prod.csv на російську через DeepL"
     )
 
+    # ✨ НОВА КОМАНДА ДЛЯ ОНОВЛЕННЯ SEO-АТРИБУТІВ ЗОБРАЖЕНЬ З CSV
     parser.add_argument(
         "--update-image-seo-from-csv",
         action="store_true",
         help="Оновлює SEO-атрибути зображень товарів з CSV (csv_path_sl_new_prod) використовуючи seo_tag."
     )
 
-    
+    # ✨ НОВА КОМАНДА ДЛЯ ПЕРЕКЛАДУ НОВОГО CSV ТА ПІДГОТОВКИ ЙОГО ДЛЯ ЗАВАНТАЖЕННЯ НА САЙТ
     parser.add_argument(
         "--translate-new-prod",
         action="store_true",
         help="Перекласти name, content та short_description нового CSV і підготувати для завантаження на сайт."
     )
 
-
+    # ✨ НОВА КОМАНДА ДЛЯ ЗАВАНТАЖЕННЯ RU ПЕРЕКЛАДІВ НА САЙТ ЧЕРЕЗ WOOCOMMERCE + WPML
     parser.add_argument(
         "--upload-ru-translations",
         action="store_true",
         help="Завантажити RU переклад товарів на сайт через WooCommerce + WPML."
     )
+    # ✨ НОВА КОМАНДА ДЛЯ ОНОВЛЕННЯ SEO-АТРИБУТІВ ЗОБРАЖЕНЬ RU З CSV
+    parser.add_argument(
+        "--update-image-seo-ru-from-csv",
+        action="store_true",
+        help="Завантажити RU переклад товарів на сайт через WooCommerce + WPML."
+    )
 
-
-# ✨ НОВИЙ АРГУМЕНТ для завантаження перекладів WPML
+    # ✨ НОВИЙ АРГУМЕНТ для завантаження перекладів WPML
     parser.add_argument(
         "--fill-wpml-translation-group",
         action="store_true", # Використовуємо прапорець, бо шлях у settings.json
         help="Завантажити російські переклади з CSV-файлу, шлях до якого вказано у settings.json (paths.csv_path_sl_new_prod_ru)."
     )
 
+    # ✨ Нова команда для виведення глобальних атрибутів у лог
+    parser.add_argument(
+        "--list-global-attributes",
+        action="store_true",
+        help="Вивести список глобальних атрибутів WooCommerce у лог."
+    )
 
+    # ✨ Нова команда для конвертації локальних атрибутів у глобальні
+    parser.add_argument(
+        "--convert-local-attributes-to-global",
+        action="store_true",
+        help="Вивести список глобальних атрибутів WooCommerce у лог."
+    )
 
     # 3. Парсинг аргументів
     args = parser.parse_args()
@@ -326,7 +344,7 @@ def main():
         print("🌐 Запускаю переклад CSV new_prod.csv на російську через DeepL...")
         translate_csv_to_ru()
 
-    elif args.update_image_seo:
+    elif args.update_image_seo_from_csv:
         print("🖼️ Починаю оновлення SEO-атрибутів зображень для всіх SKU з CSV...")
         update_image_seo_from_csv()
 
@@ -342,7 +360,20 @@ def main():
     
     elif args.fill_wpml_translation_group:
         print("🌐 Починаю завантаження російських перекладів...")
-        fill_wpml_translation_group() # Викликаємо функцію без аргументів, бо вона бере шлях з settings.json
+        fill_wpml_translation_group() 
+
+    elif args.update_image_seo_ru_from_csv:
+        print("🌐 Починаю завантаження російських перекладів...")
+        update_image_seo_ru_from_csv()
+
+    elif args.list_global_attributes:
+        print("🔍 Отримую список глобальних атрибутів...")
+        log_global_attributes()
+
+    elif args.convert_local_attributes_to_global:
+        print("🔍 Конвертація локальних атрибутів у глобальні")
+        convert_local_attributes_to_global()
+
 
     else:
         # Якщо аргументи не вказано, вивести довідку
