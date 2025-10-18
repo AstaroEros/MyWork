@@ -6,6 +6,7 @@
 # *~
 *.log
 *.csv
+config/erosckua-4dfc5adf62de.json
 config/settings.json
 config/attribute.json
 scr/__pycache__

@@ -1,6 +1,6 @@
 import argparse
 from scr.base_function import check_version, check_csv_data, export_product_by_id, update_image_seo_by_sku, translate_csv_to_ru, \
-                        log_global_attributes, convert_local_attributes_to_global
+                        log_global_attributes, convert_local_attributes_to_global, test_search_console_access
 from scr.products import export_products, download_supplier_price_list, process_supplier_1_price_list, \
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
@@ -162,6 +162,7 @@ def main():
         action='store_true', 
         help='Завантажити дані з SL_new_prod.csv і створити нові товари у базі.'
     )
+    
     # ✨ НОВА КОМАНДА ДЛЯ ПАРСИНГУ ВСІХ ДАНИХ ТОВАРУ ПО ЙОГО ID
     parser.add_argument("--export-product-by-id", 
         action="store_true", 
@@ -202,6 +203,7 @@ def main():
         action="store_true",
         help="Завантажити RU переклад товарів на сайт через WooCommerce + WPML."
     )
+    
     # ✨ НОВА КОМАНДА ДЛЯ ОНОВЛЕННЯ SEO-АТРИБУТІВ ЗОБРАЖЕНЬ RU З CSV
     parser.add_argument(
         "--update-image-seo-ru-from-csv",
@@ -228,6 +230,13 @@ def main():
         "--convert-local-attributes-to-global",
         action="store_true",
         help="Вивести список глобальних атрибутів WooCommerce у лог."
+    )
+
+    # ✨ Нова команда для перевірки підключення до Google Search Console API
+    parser.add_argument(
+        "--check-searchconsole",
+        action="store_true",
+        help="Перевірити підключення до Google Search Console API."
     )
 
     # 3. Парсинг аргументів
@@ -310,7 +319,6 @@ def main():
         print("🔢 Запускаю присвоєння нових SKU...")
         assign_new_sku_to_products()
 
-
     # ✨ Додаємо новий elif блок для завантаження зображень
     elif args.download_images:
         print("🖼️ Запускаю комплексний процес завантаження, перейменування та сортування зображень...")
@@ -326,7 +334,6 @@ def main():
         print("⬆️ Починаю пакетне оновлення існуючих товарів...")
         update_existing_products_batch()
 
-
     elif args.create_new_products:
         print("✨ Починаю пакетне створення нових товарів...")
         create_new_products_batch()
@@ -334,7 +341,6 @@ def main():
     elif args.export_product_by_id:
         print("✨ Запуск функції для парсингу всіх данних товару по його ID...")
         export_product_by_id()
-
 
     elif args.update_image_seo:
         print("🖼️ Запускаю оновлення SEO-атрибутів зображень...")
@@ -352,11 +358,9 @@ def main():
         print("🔄 Запускаю переклад нового CSV та підготовку для завантаження...")
         translate_and_prepare_new_prod_csv()
 
-
     elif args.upload_ru_translations:
         print("🌍 Завантажую RU переклади товарів на сайт...")
         upload_ru_translation_to_wp()
-    
     
     elif args.fill_wpml_translation_group:
         print("🌐 Починаю завантаження російських перекладів...")
@@ -374,6 +378,9 @@ def main():
         print("🔍 Конвертація локальних атрибутів у глобальні")
         convert_local_attributes_to_global()
 
+    elif args.check_searchconsole:
+        print("🌐 Перевіряю доступ до Google Search Console...")
+        test_search_console_access()
 
     else:
         # Якщо аргументи не вказано, вивести довідку

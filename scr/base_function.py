@@ -1424,7 +1424,6 @@ def log_global_attributes():
     except Exception as e:
         logging.error(f"❌ Помилка при отриманні списку атрибутів: {e}", exc_info=True)
 
-
 # --- КОНВЕРТАЦІЯ ЛОКАЛЬНИХ АТРИБУТІВ У ГЛОБАЛЬНІ ---
 def convert_local_attributes_to_global():
     """
@@ -1534,3 +1533,73 @@ def convert_local_attributes_to_global():
 
     except Exception as e:
         logging.error(f"❌ Критична помилка: {e}", exc_info=True)
+
+# --- ПЕРЕВІРКА ДОСТУПУ ДО GOOGLE SEARCH CONSOLE ---
+def test_search_console_access():
+    """
+    Перевіряє доступ до Google Search Console API через Service Account.
+    Виводить у лог і консоль список сайтів, до яких є доступ.
+    """
+    # --- 1. Ініціалізація логування ---
+    log_message_to_existing_file()
+    logging.info("🚀 Початок перевірки доступу до Google Search Console...")
+
+    # --- 2. Завантаження налаштувань ---
+    settings = load_settings()
+    if not settings:
+        logging.critical("❌ Не вдалося завантажити settings.json.")
+        return
+
+    json_path = settings["paths"].get("google_json")
+    if not json_path:
+        logging.critical("❌ Не вказано шлях до Google JSON ключа у settings.json (paths.google_json).")
+        print("❌ Не вказано шлях до Google JSON у settings.json (paths.google_json).")
+        return
+
+    # Якщо шлях відносний — перетворюємо на абсолютний
+    if not os.path.isabs(json_path):
+        base_dir = os.path.join(os.path.dirname(__file__), "..")
+        json_path = os.path.normpath(os.path.join(base_dir, json_path))
+
+    if not os.path.exists(json_path):
+        logging.critical(f"❌ Файл ключа Google JSON не знайдено: {json_path}")
+        print(f"❌ Не знайдено файл ключа Google JSON:\n{json_path}")
+        return
+
+    # --- 3. Імпорт бібліотек Google API ---
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+    except ImportError:
+        msg = "❌ Не встановлені бібліотеки google-auth та google-api-python-client."
+        logging.critical(msg)
+        print(f"{msg}\nВстанови їх командою:\n  pip install google-auth google-auth-oauthlib google-api-python-client")
+        return
+
+    # --- 4. Створення підключення до Search Console API ---
+    SCOPES = ["https://www.googleapis.com/auth/webmasters.readonly"]
+    try:
+        credentials = service_account.Credentials.from_service_account_file(json_path, scopes=SCOPES)
+        service = build("searchconsole", "v1", credentials=credentials)
+        response = service.sites().list().execute()
+    except Exception as e:
+        logging.critical(f"❌ Помилка при створенні з'єднання або запиті до Search Console: {e}", exc_info=True)
+        print(f"❌ Не вдалося підключитися до Search Console API.\nПомилка: {e}")
+        return
+
+    # --- 5. Обробка результатів ---
+    site_list = response.get("siteEntry", [])
+    if not site_list:
+        logging.warning("⚠️ Сервісний акаунт не має доступу до жодного сайту у Search Console.")
+        print("⚠️ Акаунт не має доступу до сайтів у Search Console.\nПеревір, чи додано цей email у Search Console з правами Full.")
+        return
+
+    print("✅ Сайти, доступні цьому акаунту:")
+    logging.info("✅ Отримано список сайтів у Search Console:")
+    for site in site_list:
+        url = site.get("siteUrl", "")
+        level = site.get("permissionLevel", "")
+        print(f" - {url} ({level})")
+        logging.info(f" - {url} ({level})")
+
+    logging.info("🎯 Перевірка Search Console завершена успішно.")
