@@ -731,11 +731,20 @@ def find_media_ids_for_sku(wcapi, sku: str, uploads_path: str) -> List[Dict[str,
             if response.status_code == 200:
                 data = response.json()
                 if isinstance(data, list) and data:
-                    item = data[0]
+                    # Знайдемо перший результат із точним збігом slug
+                    exact_match = next((item for item in data if item.get("slug", "").lower() == file_slug.lower()), None)
+                    item = exact_match or data[0]
+
                     media_id = item.get("id")
+                    media_slug = item.get("slug", "")
                     media_url = item.get("source_url", "")
                     media_title = item.get("title", {}).get("rendered", "")
-                    logging.debug(f"✅ Знайдено медіа '{file_slug}' → ID: {media_id} | Назва: {media_title} | URL: {media_url}")
+
+                    if media_slug.lower() != file_slug.lower():
+                        logging.warning(f"⚠️ '{file_slug}' знайдено неточно: повернено '{media_slug}'. (ID: {media_id})")
+                    else:
+                        logging.debug(f"✅ Точний збіг '{file_slug}' → ID: {media_id} | Назва: {media_title} | URL: {media_url}")
+
                     return media_id
                 else:
                     logging.warning(f"⚠️ Медіа '{file_slug}' не знайдено у WP медіатеці.")
@@ -1604,7 +1613,6 @@ def test_search_console_access():
 
     logging.info("🎯 Перевірка Search Console завершена успішно.")
 
-
 # --- ПЕРЕВІРКА ТА ІНДЕКСАЦІЯ ОДНІЄЇ СТОРІНКИ В GOOGLE ---
 def check_and_index_url_in_google():
     """
@@ -1697,7 +1705,6 @@ def check_and_index_url_in_google():
     except Exception as e:
         logging.critical(f"❌ Критична помилка Google API: {e}", exc_info=True)
         print("❌ Критична помилка:", e)
-
 
 # --- ПЕРЕВІРКА ТА ІНДЕКСАЦІЯ НОВИХ ТОВАРІВ З CSV ---
 def process_indexing_for_new_products():
