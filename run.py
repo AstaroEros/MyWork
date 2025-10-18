@@ -1,7 +1,7 @@
 import argparse
 from scr.base_function import check_version, check_csv_data, export_product_by_id, update_image_seo_by_sku, translate_csv_to_ru, \
                         log_global_attributes, convert_local_attributes_to_global, test_search_console_access, \
-                        check_and_index_url_in_google, process_indexing_for_new_products
+                        check_and_index_url_in_google, process_indexing_for_new_products, recheck_none_indexed_pages
 from scr.products import export_products, download_supplier_price_list, process_supplier_1_price_list, \
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
@@ -252,6 +252,13 @@ def main():
         help="Перевірити індексацію нових товарів і відправити відсутні сторінки на індексацію."
     )
 
+    parser.add_argument(
+        "--recheck-index-status",
+        action="store_true",
+        help="Перевіряє none_index.csv та оновлює статус індексації у Google."
+    )
+
+
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -402,6 +409,12 @@ def main():
     elif args.index_new_products:
         print("🌐 Запускаю перевірку індексації нових товарів...")
         process_indexing_for_new_products()
+
+    elif args.recheck_index_status:
+        print("🔄 Перевіряю статус індексації сторінок із none_index.csv...")
+        recheck_none_indexed_pages()
+
+
 
     else:
         # Якщо аргументи не вказано, вивести довідку

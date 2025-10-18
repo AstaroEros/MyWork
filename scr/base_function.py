@@ -1949,8 +1949,194 @@ def process_indexing_for_new_products():
     conn.close()
     logging.info("🏁 Перевірку та індексацію нових товарів завершено.")
 
+# --- ПОВТОРНА ПЕРЕВІРКА NONE_INDEX.CSV ---
+def recheck_none_indexed_pages():
+    """
+    Перевіряє URL із none_index.csv:
+    - Якщо вже індексований → оновлює або додає у index_google.csv і видаляє з none_index.csv.
+    - Якщо ні → повторно відправляє на індексацію та переносить у кінець none_index.csv.
+    - Зупиняється, якщо вичерпано квоту API або пройдено всі URL.
+    """
+    import csv, time
+    from datetime import datetime
+    from googleapiclient.errors import HttpError
 
+    log_message_to_existing_file()
+    logging.info("🚀 Початок повторної перевірки none_index.csv (реіндексація)")
 
+    # --- 1️⃣ Завантаження налаштувань ---
+    settings = load_settings()
+    if not settings:
+        logging.critical("❌ Не вдалося завантажити settings.json.")
+        return
+
+    paths = settings.get("paths", {})
+    none_index_path = paths.get("none_index")
+    index_log_path = paths.get("index_google")
+    json_path = paths.get("google_json")
+
+    if not all([none_index_path, index_log_path, json_path]):
+        logging.critical("❌ Відсутні необхідні шляхи у settings.json (none_index, index_google, google_json).")
+        return
+
+    # --- 2️⃣ Підключення до Google Search Console API ---
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        credentials = service_account.Credentials.from_service_account_file(
+            json_path, scopes=["https://www.googleapis.com/auth/webmasters"]
+        )
+        service = build("searchconsole", "v1", credentials=credentials)
+    except Exception as e:
+        logging.critical(f"❌ Не вдалося створити підключення до Search Console API: {e}")
+        return
+
+    # --- 3️⃣ Завантажуємо none_index.csv ---
+    if not os.path.exists(none_index_path):
+        logging.warning(f"⚠️ Файл {none_index_path} не знайдено.")
+        return
+
+    with open(none_index_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        urls = [row["URL"].strip() for row in reader if row.get("URL")]
+
+    if not urls:
+        logging.info("✅ Файл none_index.csv порожній — усі сторінки вже проіндексовані.")
+        return
+
+    # --- 4️⃣ Завантажуємо index_google.csv ---
+    index_data = []
+    existing_urls = set()
+    index_fieldnames = [
+        "URL","Тип сторінки","Стан індексації","Вердикт (verdict)","CoverageState",
+        "Last Crawl Time","Page Fetch State","Indexing Allowed","Дата запиту",
+        "Відправлено на індексацію","Дата надсилання","Помилка API","Опис помилки",
+        "HTTP статус сторінки","Коментар","ResponseTime","Tries"
+    ]
+
+    if os.path.exists(index_log_path):
+        with open(index_log_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            index_data = list(reader)
+            for row in index_data:
+                existing_urls.add(row["URL"].strip())
+
+    # --- 5️⃣ Основний цикл перевірки ---
+    processed = 0
+    indexed_now = 0
+    reindexed = 0
+
+    original_urls = list(urls)
+    updated_urls = []  # тут збиратимемо те, що залишиться в none_index
+
+    for url in original_urls:
+        processed += 1
+        logging.info(f"🔍 Перевірка {url}")
+
+        start_time = time.time()
+        result_row = {
+            "URL": url,
+            "Тип сторінки": "product",
+            "Дата запиту": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Tries": 1
+        }
+
+        try:
+            inspect_body = {"inspectionUrl": url, "siteUrl": "https://eros.in.ua/"}
+            res = service.urlInspection().index().inspect(body=inspect_body).execute()
+            info = res.get("inspectionResult", {}).get("indexStatusResult", {})
+
+            result_row["Вердикт (verdict)"] = info.get("verdict", "")
+            result_row["CoverageState"] = info.get("coverageState", "")
+            result_row["Last Crawl Time"] = info.get("lastCrawlTime", "")
+            result_row["Page Fetch State"] = info.get("pageFetchState", "")
+            result_row["Indexing Allowed"] = info.get("indexingState", "")
+            result_row["ResponseTime"] = round(time.time() - start_time, 2)
+
+            coverage = info.get("coverageState", "")
+            verdict = info.get("verdict", "")
+            is_indexed = ("Indexed" in coverage) or (verdict == "PASS")
+
+            # --- Якщо Indexed ---
+            if is_indexed:
+                indexed_now += 1
+                result_row["Стан індексації"] = "Indexed"
+                result_row["Відправлено на індексацію"] = "No"
+                logging.info(f"✅ {url} вже в індексі — оновлюю index_google і видаляю з none_index.")
+
+                # Оновлюємо або додаємо до index_google
+                updated = False
+                for row in index_data:
+                    if row["URL"] == url:
+                        row.update(result_row)
+                        updated = True
+                        break
+                if not updated:
+                    index_data.append(result_row)
+
+                # ❌ Не додаємо назад у updated_urls (тобто видаляємо)
+                continue
+
+            # --- Якщо не Indexed ---
+            reindexed += 1
+            result_row["Стан індексації"] = "Not Indexed"
+            result_row["Відправлено на індексацію"] = "Yes"
+            result_row["Дата надсилання"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            logging.warning(f"⚠️ {url} не індексована — повторна відправка...")
+
+            try:
+                service.urlInspection().index().inspect(body=inspect_body).execute()
+            except Exception as send_err:
+                logging.error(f"❌ Помилка при повторному надсиланні {url}: {send_err}")
+
+            # Оновлюємо або додаємо у index_google
+            updated = False
+            for row in index_data:
+                if row["URL"] == url:
+                    row.update(result_row)
+                    updated = True
+                    break
+            if not updated:
+                index_data.append(result_row)
+
+            # 🔁 Додаємо у кінець черги (оновлений список)
+            updated_urls.append(url)
+
+        except HttpError as e:
+            if "quota" in str(e).lower() or "resource_exhausted" in str(e).lower():
+                logging.error("⚠️ Вичерпано денний ліміт API. Зупиняю перевірку.")
+                break
+            else:
+                result_row["Стан індексації"] = "Error"
+                result_row["Помилка API"] = getattr(e, "status_code", "")
+                result_row["Опис помилки"] = str(e)
+                logging.error(f"❌ API Error {url}: {e}")
+                updated_urls.append(url)  # зберігаємо в черзі, бо не перевірено
+        except Exception as e:
+            result_row["Стан індексації"] = "Error"
+            result_row["Опис помилки"] = str(e)
+            logging.error(f"❌ Невідома помилка {url}: {e}")
+            updated_urls.append(url)
+
+        # --- Оновлюємо index_google.csv після кожного URL ---
+        with open(index_log_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=index_fieldnames)
+            writer.writeheader()
+            writer.writerows(index_data)
+
+        time.sleep(1)
+
+    # --- 6️⃣ Запис оновленого none_index.csv ---
+    with open(none_index_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["URL"])
+        writer.writeheader()
+        for u in updated_urls:
+            writer.writerow({"URL": u})
+
+    logging.info("🏁 Перевірку завершено.")
+    logging.info(f"🧮 Всього перевірено: {processed}")
+    logging.info(f"✅ В індексі: {indexed_now}")
+    logging.info(f"📤 Повторно відправлено: {reindexed}")
 
 
 
