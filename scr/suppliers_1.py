@@ -1609,8 +1609,9 @@ def create_new_products_batch():
 def update_image_seo_from_csv():
     """
     Оновлює SEO-атрибути зображень українських товарів з файлу csv_path_sl_new_prod.
-    Логування у стилі upload_ru_translation_to_wp().
+    Тепер усі HTTP-запити до WP REST API виконуються через один Session (keep-alive).
     """
+
     log_message_to_existing_file()
     logging.info("🚀 Початок оновлення SEO-атрибутів (UA) для товарів із CSV...")
 
@@ -1665,6 +1666,13 @@ def update_image_seo_from_csv():
     wp_login = settings.get("login")
     wp_pass = settings.get("pass")
 
+    # 🧠 Створюємо один Session для всіх HTTP-запитів
+    session = requests.Session()
+    if wp_login and wp_pass:
+        session.auth = (wp_login, wp_pass)
+    session.headers.update({"Content-Type": "application/json"})
+    session.verify = True
+
     updated_count = 0
     failed_count = 0
 
@@ -1674,7 +1682,7 @@ def update_image_seo_from_csv():
         category = item["category"]
         idx = item["row_idx"]
 
-        # --- Формуємо SEO-теги для товару ---
+        # --- Формуємо SEO-теги ---
         seo_row = seo_tags_map.get(category)
         if seo_row:
             alt = seo_row.get("alt_ukr", "").replace("{product_name}", product_name)
@@ -1710,48 +1718,45 @@ def update_image_seo_from_csv():
 
         wc_images_update = []
 
-        # --- Оновлення кожного зображення ---
+        # --- Оновлення кожного зображення через один session ---
         for img in images:
             img_id = img.get("id")
             src = img.get("src")
 
-            if not img_id and src and wp_login and wp_pass:
+            if not img_id and src:
                 filename = os.path.basename(src)
                 try:
-                    media_search = requests.get(
+                    media_search = session.get(
                         f"{base_url}/wp-json/wp/v2/media",
-                        params={"search": filename},
-                        auth=(wp_login, wp_pass)
+                        params={"search": filename}
                     )
                     if media_search.status_code == 200 and media_search.json():
                         img_id = media_search.json()[0].get("id")
                 except Exception as e:
                     logging.warning(f"Рядок {idx}, SKU {sku}: не вдалося знайти медіа через WP API: {e}")
 
-            if img_id:
-                # --- Декодуємо HTML спеціальні символи в тайтлі ---
-                safe_title = html.unescape(title)
+            if not img_id:
+                continue
 
-                wc_images_update.append({"id": img_id, "alt": alt, "name": safe_title})
+            safe_title = html.unescape(title)
+            wc_images_update.append({"id": img_id, "alt": alt, "name": safe_title})
 
-                # --- Оновлення caption/description через WP REST API ---
-                if wp_login and wp_pass:
-                    try:
-                        media_endpoint = f"{base_url}/wp-json/wp/v2/media/{img_id}"
-                        requests.put(
-                            media_endpoint,
-                            auth=(wp_login, wp_pass),
-                            json={
-                                "title": safe_title,
-                                "alt_text": alt,
-                                "caption": caption,
-                                "description": description
-                            }
-                        )
-                    except Exception as e:
-                        logging.warning(f"Рядок {idx}, SKU {sku}, img_id {img_id}: не вдалося оновити WP media: {e}")
+            try:
+                media_endpoint = f"{base_url}/wp-json/wp/v2/media/{img_id}"
+                session.put(
+                    media_endpoint,
+                    json={
+                        "title": safe_title,
+                        "alt_text": alt,
+                        "caption": caption,
+                        "description": description
+                    },
+                    timeout=30
+                )
+            except Exception as e:
+                logging.warning(f"Рядок {idx}, SKU {sku}, img_id {img_id}: не вдалося оновити WP media: {e}")
 
-        # --- Оновлення через WooCommerce PUT ---
+        # --- WooCommerce PUT для alt/title ---
         if wc_images_update and product_id:
             try:
                 resp_put = wcapi.put(f"products/{product_id}", {"images": wc_images_update})
@@ -1765,12 +1770,16 @@ def update_image_seo_from_csv():
                 logging.error(f"Рядок {idx}, SKU {sku}: WooCommerce PUT exception: {e}")
                 failed_count += len(wc_images_update)
 
+    # --- Закриваємо сесію ---
+    session.close()
+
     logging.info(f"🎯 Оновлення SEO (UA) завершено. Успішно оновлено: {updated_count}, не вдалося: {failed_count}.")
 
 def translate_and_prepare_new_prod_csv():
     """
     Створює новий RU CSV на основі UA:
-    - переклад name → Title_ru, content → Content_ru, excerpt → Excerpt_ru
+    - переклад name → Title_ru, content → Content_ru
+    - Excerpt_ru копіюється з Content_ru
     - rank_math_focus_keyword та categories копіюються
     - WPML Translation ID підтягнуто зі старого перекладу
     - решта полів заповнюються з існуючого RU CSV або залишаються порожніми
@@ -1831,10 +1840,13 @@ def translate_and_prepare_new_prod_csv():
                 new_row = {col: "" for col in output_headers}
                 new_row["Sku"] = sku
 
-                # 🔹 Переклади у нові колонки
+                # 🔹 Переклад лише Title та Content
                 new_row["Title_ru"] = translate_text_deepl(row.get("name", "").strip(), "RU", api_key, api_url)
-                new_row["Content_ru"] = translate_text_deepl(row.get("content", "").strip(), "RU", api_key, api_url)
-                new_row["Excerpt_ru"] = translate_text_deepl(row.get("excerpt", "").strip(), "RU", api_key, api_url)
+                translated_content = translate_text_deepl(row.get("content", "").strip(), "RU", api_key, api_url)
+                new_row["Content_ru"] = translated_content
+
+                # 🔹 Excerpt_ru просто копіюємо з перекладеного Content_ru
+                new_row["Excerpt_ru"] = translated_content
 
                 # 🔹 Копіювання без перекладу
                 new_row["rank_math_focus_keyword"] = row.get("rank_math_focus_keyword", "")
@@ -1851,7 +1863,10 @@ def translate_and_prepare_new_prod_csv():
 
                 # 🔹 Підтягуємо решту полів
                 for key, value in ru_row.items():
-                    if key in output_headers and key not in ["Sku","Title_ru","Content_ru","Excerpt_ru","categories","rank_math_focus_keyword","WPML Language Code","WPML Translation ID"]:
+                    if key in output_headers and key not in [
+                        "Sku","Title_ru","Content_ru","Excerpt_ru","categories",
+                        "rank_math_focus_keyword","WPML Language Code","WPML Translation ID"
+                    ]:
                         new_row[key] = value
 
                 writer.writerow(new_row)
@@ -1873,114 +1888,219 @@ def translate_and_prepare_new_prod_csv():
 def upload_ru_translation_to_wp():
     """
     Створює RU переклад для кожного продукту UA через WPML.
-    Береться SKU з оригіналу, всі дані (images, attributes, categories) копіюються з оригіналу,
-    а поля name/content/excerpt беруться з CSV.
-    WPML автоматично підставляє SKU та зв'язок перекладу.
+    Усі HTTP-запити до WooCommerce REST API виконуються через один requests.Session (keep-alive).
     """
-    log_message_to_existing_file()
-    logging.info("🚀 Початок імпорту RU перекладів через WPML...")
 
+    import requests
+    import json
+
+    log_message_to_existing_file()
+    logging.info("🚀 Початок імпорту RU перекладів через WPML (одна Session)...")
+
+    # --- Налаштування ---
     settings = load_settings()
-    csv_path = settings["paths"].get("csv_path_sl_new_prod_ru")
-    if not csv_path:
-        logging.error("❌ Не вказано шлях до csv_path_sl_new_prod_ru у settings.json")
+    if not settings:
+        logging.critical("❌ Не вдалося завантажити налаштування.")
         return
 
-    try:
-        wcapi = get_wc_api(settings)
+    csv_path = settings["paths"].get("csv_path_sl_new_prod_ru")
+    if not csv_path:
+        logging.critical("❌ Не вказано шлях до csv_path_sl_new_prod_ru у settings.json.")
+        return
 
-        with open(csv_path, 'r', encoding='utf-8') as f:
+    base_url = (settings.get("url") or "").rstrip("/")
+    ck = settings.get("consumer_key")
+    cs = settings.get("consumer_secret")
+    if not base_url or not ck or not cs:
+        logging.critical("❌ В settings.json відсутні url / consumer_key / consumer_secret.")
+        return
+
+    # --- Один Session для ВСІХ запитів до WooCommerce ---
+    session = requests.Session()
+    session.auth = (ck, cs)
+    session.headers.update({"Accept": "application/json", "Content-Type": "application/json"})
+    session.verify = True  # SSL
+
+    created_count = 0
+    skipped_count = 0
+    failed_count = 0
+
+    # Невеликий кеш, щоб не дублювати запити
+    category_cache = {}       # {cat_id: {"id": <ru_id>, "name": <ru_name>} або {"name": <fallback_name>}}
+    attr_terms_cache = {}     # {attr_id: [option_name_ru, ...]}
+
+    try:
+        # --- Зчитуємо CSV RU ---
+        with open(csv_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
 
             for idx, row in enumerate(reader, start=2):
-                sku = row.get("Sku")
-                trid = row.get("_wpml_import_translation_group")
+                sku = (row.get("Sku") or row.get("sku") or "").strip()
+                trid = (row.get("_wpml_import_translation_group") or "").strip()
+                title_ru = row.get("Title_ru", "") or row.get("name", "")
+                content_ru = row.get("Content_ru", "") or row.get("content", "")
+                excerpt_ru = row.get("Excerpt_ru", "") or row.get("short_description", "")
+
                 if not sku or not trid:
-                    logging.warning(f"Рядок {idx}: пропущено через відсутній SKU або trid")
+                    logging.warning(f"Рядок {idx}: пропущено через відсутній SKU або _wpml_import_translation_group.")
+                    skipped_count += 1
                     continue
 
-                # --- 1️⃣ Отримати оригінальний продукт UA ---
-                resp = wcapi.get("products", params={"sku": sku, "lang": "uk"})
-                if not resp.ok:
-                    logging.warning(f"⚠️ SKU {sku}: не вдалося отримати оригінальний продукт UA: {resp.text}")
+                # --- 1) Отримати оригінальний продукт UA за SKU ---
+                try:
+                    resp = session.get(
+                        f"{base_url}/wp-json/wc/v3/products",
+                        params={"sku": sku, "lang": "uk"},
+                        timeout=30
+                    )
+                except Exception as e:
+                    logging.warning(f"SKU {sku}: помилка мережі при GET products (UA): {e}")
+                    failed_count += 1
                     continue
 
-                products = resp.json()
+                if resp.status_code != 200:
+                    logging.warning(f"SKU {sku}: GET products (UA) → {resp.status_code}: {resp.text[:200]}")
+                    failed_count += 1
+                    continue
+
+                products = resp.json() or []
                 if not products:
-                    logging.warning(f"⚠️ SKU {sku}: оригінальний продукт UA не знайдено")
+                    logging.warning(f"SKU {sku}: оригінальний продукт UA не знайдено.")
+                    skipped_count += 1
                     continue
 
                 original = products[0]
                 original_id = original.get("id")
+                if not original_id:
+                    logging.warning(f"SKU {sku}: відсутній ID у відповіді оригіналу.")
+                    failed_count += 1
+                    continue
 
-                # --- 2️⃣ Категорії та атрибути в RU ---
+                # --- 2) Категорії RU (із кешем) ---
                 categories_ru = []
-                for cat in original.get("categories", []):
+                for cat in original.get("categories", []) or []:
                     cat_id = cat.get("id")
-                    if cat_id:
-                        cat_resp = wcapi.get(f"products/categories/{cat_id}", params={"lang": "ru"})
-                        if cat_resp.ok:
-                            cat_data = cat_resp.json()
-                            categories_ru.append({"id": cat_data["id"], "name": cat_data["name"]})
-                        else:
-                            categories_ru.append({"name": cat.get("name")})
-                    else:
+                    if not cat_id:
+                        # Fallback лише з name (коли немає id)
                         categories_ru.append({"name": cat.get("name")})
+                        continue
 
-                attributes_ru = []
-                for attr in original.get("attributes", []):
-                    attr_id = attr.get("id")
-                    if attr_id:
-                        attr_resp = wcapi.get(f"products/attributes/{attr_id}/terms", params={"lang": "ru"})
-                        if attr_resp.ok:
-                            options_ru = [v.get("name") for v in attr_resp.json()]
+                    if cat_id in category_cache:
+                        categories_ru.append(category_cache[cat_id])
+                        continue
+
+                    try:
+                        c_resp = session.get(
+                            f"{base_url}/wp-json/wc/v3/products/categories/{cat_id}",
+                            params={"lang": "ru"},
+                            timeout=20
+                        )
+                        if c_resp.status_code == 200:
+                            c_data = c_resp.json()
+                            mapped = {"id": c_data.get("id"), "name": c_data.get("name")}
+                            categories_ru.append(mapped)
+                            category_cache[cat_id] = mapped
                         else:
-                            options_ru = [v for v in attr.get("options", [])]
-                        attributes_ru.append({
-                            "id": attr_id,
-                            "name": attr.get("name"),
-                            "position": attr.get("position", 0),
-                            "visible": attr.get("visible", True),
-                            "variation": attr.get("variation", False),
-                            "options": options_ru
-                        })
-                    else:
-                        attributes_ru.append(attr)
+                            # Fallback: використати назву UA
+                            mapped = {"name": cat.get("name")}
+                            categories_ru.append(mapped)
+                            category_cache[cat_id] = mapped
+                    except Exception as e:
+                        mapped = {"name": cat.get("name")}
+                        categories_ru.append(mapped)
+                        category_cache[cat_id] = mapped
+                        logging.debug(f"SKU {sku}: categories fallback через помилку: {e}")
 
-                # --- 3️⃣ Дані перекладу ---
+                # --- 3) Атрибути RU (із кешем термінів) ---
+                attributes_ru = []
+                for attr in original.get("attributes", []) or []:
+                    attr_id = attr.get("id")
+                    if not attr_id:
+                        # Локальний атрибут — копіюємо як є
+                        attributes_ru.append(attr)
+                        continue
+
+                    if attr_id in attr_terms_cache:
+                        options_ru = attr_terms_cache[attr_id]
+                    else:
+                        try:
+                            a_resp = session.get(
+                                f"{base_url}/wp-json/wc/v3/products/attributes/{attr_id}/terms",
+                                params={"lang": "ru", "per_page": 100},
+                                timeout=20
+                            )
+                            if a_resp.status_code == 200:
+                                options_ru = [v.get("name") for v in (a_resp.json() or [])]
+                            else:
+                                options_ru = [v for v in attr.get("options", [])]
+                            attr_terms_cache[attr_id] = options_ru
+                        except Exception as e:
+                            options_ru = [v for v in attr.get("options", [])]
+                            attr_terms_cache[attr_id] = options_ru
+                            logging.debug(f"SKU {sku}: attr terms fallback через помилку: {e}")
+
+                    attributes_ru.append({
+                        "id": attr_id,
+                        "name": attr.get("name"),
+                        "position": attr.get("position", 0),
+                        "visible": attr.get("visible", True),
+                        "variation": attr.get("variation", False),
+                        "options": options_ru
+                    })
+
+                # --- 4) Формуємо дані RU перекладу ---
                 translated_data = {
-                    "lang": "ru",  # <-- ОБОВ'ЯЗКОВО
-                    "translation_of": original_id,  # посилання на оригінальний продукт UA
-                    "name": row.get("Title_ru", ""),
-                    "description": row.get("Content_ru", ""),
-                    "short_description": row.get("Excerpt_ru", ""),
-                    "meta_data": original.get("meta_data", []) + [
+                    "lang": "ru",
+                    "translation_of": original_id,
+                    "name": title_ru or "",
+                    "description": content_ru or "",
+                    "short_description": excerpt_ru or "",
+                    "meta_data": (original.get("meta_data") or []) + [
                         {"key": "_wpml_import_translation_group", "value": trid},
                         {"key": "_wpml_import_language_code", "value": "ru"},
                         {"key": "_wpml_import_source_language_code", "value": "ua"}
                     ],
                     "categories": categories_ru,
                     "attributes": attributes_ru,
-                    "images": original.get("images", []),
+                    "images": original.get("images", []) or [],
                     "type": original.get("type", "simple"),
                     "stock_status": original.get("stock_status", "instock"),
-                    "regular_price": original.get("regular_price", ""),
-                    "sale_price": original.get("sale_price", "")
-                    # SKU не передається, WPML автоматично підставить оригінальний
+                    "regular_price": original.get("regular_price", "") or "",
+                    "sale_price": original.get("sale_price", "") or ""
+                    # SKU не передаємо — WPML підставить із оригіналу
                 }
 
-                # --- 4️⃣ Створюємо переклад RU ---
-                post_resp = wcapi.post("products", translated_data)
-                if post_resp.ok:
-                    new_id = post_resp.json().get("id")
+                # --- 5) Створюємо RU продукт ---
+                try:
+                    p_resp = session.post(
+                        f"{base_url}/wp-json/wc/v3/products",
+                        data=json.dumps(translated_data),
+                        timeout=40
+                    )
+                except Exception as e:
+                    logging.warning(f"SKU {sku}: помилка мережі при POST products (RU): {e}")
+                    failed_count += 1
+                    continue
+
+                if p_resp.status_code in (200, 201):
+                    new_id = (p_resp.json() or {}).get("id")
+                    created_count += 1
                     logging.info(f"🆕 SKU {sku}: створено RU переклад (ID {new_id})")
                 else:
-                    logging.warning(f"⚠️ SKU {sku}: не вдалося створити RU переклад. {post_resp.text}")
+                    failed_count += 1
+                    logging.warning(f"⚠️ SKU {sku}: не вдалося створити RU переклад → {p_resp.status_code}: {p_resp.text[:300]}")
 
-        logging.info("✅ Імпорт RU перекладів завершено успішно!")
+        logging.info(f"✅ Імпорт RU перекладів завершено. Створено: {created_count}, пропущено: {skipped_count}, помилок: {failed_count}.")
 
     except Exception as e:
-        logging.error(f"❌ Помилка під час імпорту перекладів: {e}")
+        logging.error(f"❌ Критична помилка під час імпорту перекладів: {e}", exc_info=True)
+
+    finally:
+        try:
+            session.close()
+            logging.info("🔒 HTTPS Session закрито.")
+        except Exception:
+            pass
 
 def update_image_seo_ru_from_csv():
     """
