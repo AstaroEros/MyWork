@@ -5,6 +5,8 @@ import requests
 import shutil
 import re
 import pandas as pd
+import mysql.connector
+import pymysql
 import mimetypes
 from bs4 import BeautifulSoup
 import random 
@@ -1778,23 +1780,40 @@ def update_image_seo_from_csv():
 def translate_and_prepare_new_prod_csv():
     """
     Створює новий RU CSV на основі UA:
+    - для кожного SKU бере name, content і rank_math_focus_keyword з бази даних
     - переклад name → Title_ru, content → Content_ru
     - Excerpt_ru копіюється з Content_ru
-    - rank_math_focus_keyword та categories копіюються
+    - rank_math_focus_keyword копіюється без перекладу
     - WPML Translation ID підтягнуто зі старого перекладу
     - решта полів заповнюються з існуючого RU CSV або залишаються порожніми
     """
     log_message_to_existing_file()
-    logging.info("🚀 Початок формування нового RU CSV...")
+    logging.info("🚀 Початок формування нового RU CSV (джерело name/content/keyword — база даних)...")
 
     settings = load_settings()
     input_path = settings["paths"].get("csv_path_sl_new_prod")
     output_path = settings["paths"].get("csv_path_sl_new_prod_ru")
     api_key = settings.get("deepl_api_key")
     api_url = settings.get("DEEPL_API_URL", "https://api-free.deepl.com/v2/translate")
+    db_conf = settings.get("db")
 
-    if not all([input_path, output_path, api_key]):
-        logging.error("❌ Не вказані всі параметри у settings.json")
+    if not all([input_path, output_path, api_key, db_conf]):
+        logging.error("❌ Не вказані всі параметри у settings.json (csv_path або deepl_api_key або db)")
+        return
+
+    # 🔹 Підключення до бази WordPress
+    try:
+        conn = mysql.connector.connect(
+            host=db_conf["host"],
+            user=db_conf["user"],
+            password=db_conf["password"],
+            database=db_conf["database"],
+            charset="utf8mb4"
+        )
+        cursor = conn.cursor(dictionary=True)
+        logging.info("🟢 Підключено до бази даних WordPress.")
+    except Exception as e:
+        logging.critical(f"❌ Не вдалося підключитись до бази: {e}")
         return
 
     # 🔸 Перевіряємо залишок символів перед початком
@@ -1840,28 +1859,59 @@ def translate_and_prepare_new_prod_csv():
                 new_row = {col: "" for col in output_headers}
                 new_row["Sku"] = sku
 
-                # 🔹 Переклад лише Title та Content
-                new_row["Title_ru"] = translate_text_deepl(row.get("name", "").strip(), "RU", api_key, api_url)
-                translated_content = translate_text_deepl(row.get("content", "").strip(), "RU", api_key, api_url)
+                # --- Отримуємо назву, опис і rank_math_focus_keyword з бази ---
+                try:
+                    cursor.execute("""
+                        SELECT p.ID, p.post_title AS name, p.post_content AS content
+                        FROM wp_posts p
+                        JOIN wp_postmeta m ON p.ID = m.post_id
+                        WHERE m.meta_key = '_sku' AND m.meta_value = %s AND p.post_type = 'product'
+                        LIMIT 1;
+                    """, (sku,))
+                    result = cursor.fetchone()
+
+                    if not result:
+                        logging.warning(f"⚠️ SKU {sku}: товар не знайдено в базі, пропускаємо переклад.")
+                        continue
+
+                    product_id = result["ID"]
+                    name_ua = result["name"] or ""
+                    content_ua = result["content"] or ""
+
+                    # --- Отримуємо rank_math_focus_keyword з постмети ---
+                    cursor.execute("""
+                        SELECT meta_value FROM wp_postmeta
+                        WHERE post_id = %s AND meta_key = 'rank_math_focus_keyword' LIMIT 1;
+                    """, (product_id,))
+                    keyword_res = cursor.fetchone()
+                    rank_math_keyword = keyword_res["meta_value"] if keyword_res else ""
+
+                except Exception as e:
+                    logging.error(f"❌ Помилка при запиті до бази для SKU {sku}: {e}")
+                    continue
+
+                # --- Переклад назви і опису ---
+                new_row["Title_ru"] = translate_text_deepl(name_ua.strip(), "RU", api_key, api_url)
+                translated_content = translate_text_deepl(content_ua.strip(), "RU", api_key, api_url)
                 new_row["Content_ru"] = translated_content
 
-                # 🔹 Excerpt_ru просто копіюємо з перекладеного Content_ru
+                # --- Excerpt_ru просто копіюємо з перекладеного Content_ru ---
                 new_row["Excerpt_ru"] = translated_content
 
-                # 🔹 Копіювання без перекладу
-                new_row["rank_math_focus_keyword"] = row.get("rank_math_focus_keyword", "")
+                # --- rank_math_focus_keyword без перекладу ---
+                new_row["rank_math_focus_keyword"] = rank_math_keyword
+
+                # --- categories копіюємо з українського CSV ---
                 new_row["categories"] = row.get("categories", "")
 
-                # 🔹 WPML
+                # --- WPML дані ---
                 ru_row = existing_translations.get(sku, {})
                 new_row["WPML Language Code"] = "ru"
                 new_row["WPML Translation ID"] = ru_row.get("WPML Translation ID", "")
-
-                # 🔹 Встановлюємо мови для імпорту
                 new_row["_wpml_import_language_code"] = "ru"
                 new_row["_wpml_import_source_language_code"] = "uk"
 
-                # 🔹 Підтягуємо решту полів
+                # --- решта полів з існуючого RU CSV ---
                 for key, value in ru_row.items():
                     if key in output_headers and key not in [
                         "Sku","Title_ru","Content_ru","Excerpt_ru","categories",
@@ -1870,20 +1920,27 @@ def translate_and_prepare_new_prod_csv():
                         new_row[key] = value
 
                 writer.writerow(new_row)
-                logging.info(f"✅ Рядок {idx}: SKU {sku} перекладено")
+                logging.info(f"✅ Рядок {idx}: SKU {sku} перекладено (дані з бази)")
 
         logging.info(f"🎯 Готово! Файл збережено: {output_path}")
 
-        # 🔹 Підтягуємо _wpml_import_translation_group
+        # --- WPML оновлення ---
         logging.info("🔄 Оновлюємо колонку _wpml_import_translation_group...")
         fill_wpml_translation_group()
         logging.info("🏁 Оновлення _wpml_import_translation_group завершено.")
 
-        # 🔸 Перевіряємо залишок символів після завершення
+        # --- Перевірка ліміту DeepL ---
         get_deepl_usage(api_key)
 
     except Exception as e:
         logging.error(f"❌ Помилка під час формування CSV: {e}")
+    finally:
+        try:
+            cursor.close()
+            conn.close()
+        except:
+            pass
+
 
 def upload_ru_translation_to_wp():
     """

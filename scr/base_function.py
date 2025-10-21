@@ -1288,7 +1288,7 @@ def clean_text(text):
     """
     if not text:
         return ""
-    text = re.sub(r'<[^>]+>', '', text)  # видалити HTML теги
+    # text = re.sub(r'<[^>]+>', '', text)  # видалити HTML теги
     text = re.sub(r'\s+', ' ', text).strip()  # зайві пробіли та переводи рядків
     return text
 
@@ -1313,7 +1313,7 @@ def get_deepl_usage(api_key, api_url="https://api-free.deepl.com/v2/usage"):
 def translate_text_deepl(text, target_lang="RU", api_key=None, api_url=None):
     """
     Переклад тексту через DeepL API з ігноруванням англійських слів та кодів.
-    Використовує короткий тег <i> для економії символів.
+    Тепер підтримує HTML-теги (<strong>, <em>, <p> і т.д.), не перетворюючи їх у &lt; &gt;.
     """
     if not text.strip():
         return text
@@ -1339,8 +1339,8 @@ def translate_text_deepl(text, target_lang="RU", api_key=None, api_url=None):
     translated_chunks = []
     for chunk in chunks:
         pattern = r'\b[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]\b|\b[a-zA-Z0-9]+\b'
-        
-        # --- ЗМІНА 1: Використовуємо короткий тег <i> ---
+
+        # Ті самі короткі <i> теги для ігнорування англійських слів
         chunk_with_tags = re.sub(pattern, r'<i>\g<0></i>', chunk)
 
         try:
@@ -1350,19 +1350,18 @@ def translate_text_deepl(text, target_lang="RU", api_key=None, api_url=None):
                     "auth_key": api_key,
                     "text": chunk_with_tags,
                     "target_lang": target_lang,
-                    "tag_handling": "xml",
-                    # --- ЗМІНА 2: Вказуємо новий тег для ігнорування ---
-                    "ignore_tags": "i" 
+                    # 🔹 ГОЛОВНА ЗМІНА — вказуємо HTML, не XML
+                    "tag_handling": "html",
+                    "ignore_tags": "i"
                 },
                 timeout=30
             )
             response.raise_for_status()
-            
+
             translated_text = response.json()["translations"][0]["text"]
-            
-            # Надійне очищення тегів, якщо API їх випадково повернув
+
+            # Прибираємо службові теги <i>, якщо залишилися
             translated_text = translated_text.replace("<i>", "").replace("</i>", "")
-            
             translated_chunks.append(translated_text)
             time.sleep(0.5)
         except Exception as e:
