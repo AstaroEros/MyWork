@@ -18,7 +18,7 @@ from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log
                                 save_attributes_csv, load_category_csv, save_category_csv, load_poznachky_csv, \
                                 _process_batch_update, find_media_ids_for_sku, _process_batch_create, clear_directory, \
                                 download_product_images, move_gifs, convert_to_webp_square, sync_webp_column, copy_to_site, \
-                                translate_text_deepl, get_deepl_usage, fill_wpml_translation_group
+                                translate_text_deepl, get_deepl_usage, fill_wpml_translation_group, notify_user
 from datetime import datetime, timedelta
 
 
@@ -1607,6 +1607,9 @@ def create_new_products_batch():
             logging.warning(f"-> {error}")
     else:
         logging.info("✅ Створення нових товарів завершено успішно.")
+
+    # ... твоя основна логіка
+    notify_user("Готово ✅", "Пакетне оновлення завершено", sound=True)
 
 def update_image_seo_from_csv():
     """

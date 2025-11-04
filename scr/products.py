@@ -7,7 +7,7 @@ import re
 import pandas as pd
 import random 
 import logging
-from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log_message_to_existing_file
+from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log_message_to_existing_file, notify_user
 from datetime import datetime, timedelta
 
 

@@ -1,7 +1,6 @@
 from woocommerce import API
 import json
-import os, csv, shutil, logging, requests, mimetypes, glob
-import logging
+import os, csv, shutil, logging, requests, mimetypes, glob, sys, subprocess
 import html
 import re
 import mysql.connector
@@ -11,6 +10,7 @@ from PIL import Image
 from bs4 import BeautifulSoup
 import time
 import pymysql
+from time import sleep
 
 
 # --- ЗАГАЛЬНІ ФУНКЦІЇ ---
@@ -2288,7 +2288,51 @@ def preload_cache_from_urls(source: int = 1, timeout: int = 20, pause_sec: float
 
     logging.info("✅ Прелоад кешу завершено.")
 
+def notify_user(title: str = "Готово ✅",
+               message: str = "Операцію виконано",
+               sound: bool = True,
+                ) -> None:
+    """
+    Помітне сповіщення для Windows:
+      • Системно-модальне діалогове вікно (MessageBoxW) — видно навіть коли всі вікна згорнуті
+      • Звуковий сигнал (winsound)
+      • (опційно) Озвучення через pyttsx3
+      • (опційно) Toast-сповіщення через win10toast
+    Працює без зовнішніх залежностей (крім опційного toast/voice).
+    """
+    shown = False
 
+    # 1) СИСТЕМНО-МОДАЛЬНЕ ВІКНО
+    try:
+        import ctypes
+        MB_OK              = 0x00000000
+        MB_ICONINFORMATION = 0x00000040
+        MB_SYSTEMMODAL     = 0x00001000  # поверх усього
+        MB_TOPMOST         = 0x00040000  # topmost
+        flags = MB_OK | MB_ICONINFORMATION | MB_SYSTEMMODAL | MB_TOPMOST
+        ctypes.windll.user32.MessageBoxW(0, str(message), str(title), flags)
+        shown = True
+    except Exception as e:
+        logging.debug(f"notify_win MessageBoxW error: {e}")
+
+    # 2) ЗВУК
+    if sound:
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+            time.sleep(0.2)
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        except Exception as e:
+            logging.debug(f"notify_win sound error: {e}")
+        finally:
+            # резерв на випадок, якщо системний звук вимкнено
+            try:
+                print("\a", end="", flush=True)
+            except Exception:
+                pass
+
+    if not shown:
+        logging.info(f"[NOTIFY] {title}: {message}")
 
 
 
