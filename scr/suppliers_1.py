@@ -1680,7 +1680,21 @@ def update_image_seo_from_csv():
 
     for item in skus:
         sku = item["sku"]
-        product_name = item["name"]
+        
+        # --- Отримуємо товар з WooCommerce ---
+        try:
+            resp = wcapi.get("products", params={"sku": sku, "lang": "uk"})
+            if resp.status_code != 200 or not resp.json():
+                logging.warning(f"Рядок {idx}, SKU {sku}: товар не знайдено або помилка GET.")
+                failed_count += 1
+                continue
+            product = resp.json()[0]
+        except Exception as e:
+            logging.error(f"Рядок {idx}, SKU {sku}: WooCommerce GET exception: {e}")
+            failed_count += 1
+            continue
+        
+        product_name = product.get("name", "").strip()
         category = item["category"]
         idx = item["row_idx"]
 
@@ -1696,19 +1710,6 @@ def update_image_seo_from_csv():
             caption = f"{product_name} – інноваційна секс-іграшка"
             description = f"{product_name} купити в інтернет-магазині Eros.in.ua."
             title = product_name
-
-        # --- Отримуємо товар з WooCommerce ---
-        try:
-            resp = wcapi.get("products", params={"sku": sku, "lang": "uk"})
-            if resp.status_code != 200 or not resp.json():
-                logging.warning(f"Рядок {idx}, SKU {sku}: товар не знайдено або помилка GET.")
-                failed_count += 1
-                continue
-            product = resp.json()[0]
-        except Exception as e:
-            logging.error(f"Рядок {idx}, SKU {sku}: WooCommerce GET exception: {e}")
-            failed_count += 1
-            continue
 
         product_id = product.get("id")
         images = product.get("images", [])
@@ -1940,7 +1941,6 @@ def translate_and_prepare_new_prod_csv():
             conn.close()
         except:
             pass
-
 
 def upload_ru_translation_to_wp():
     """

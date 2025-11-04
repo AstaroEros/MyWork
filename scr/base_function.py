@@ -112,8 +112,8 @@ def log_message_to_existing_file():
     if not logging.getLogger().hasHandlers():
         logging.basicConfig(
             filename=current_log_path,
-            #level=logging.INFO,
-            level=logging.DEBUG,
+            level=logging.INFO,
+            #level=logging.DEBUG,
             format='%(asctime)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S',
             filemode='a'
@@ -1312,10 +1312,13 @@ def get_deepl_usage(api_key, api_url="https://api-free.deepl.com/v2/usage"):
 
 def translate_text_deepl(text, target_lang="RU", api_key=None, api_url=None):
     """
-    Переклад тексту через DeepL API з ігноруванням англійських слів та кодів.
-    Тепер підтримує HTML-теги (<strong>, <em>, <p> і т.д.), не перетворюючи їх у &lt; &gt;.
+    Переклад через DeepL із БЕЗПЕЧНИМ збереженням HTML:
+    - HTML-теги (<strong>, <em>, <p> тощо) НЕ відправляються в DeepL і повертаються як є.
+    - Перекладаються лише текстові сегменти між тегами.
+    - Сегменти без кирилиці (англ/цифри) не перекладаються взагалі.
+    - Довгі сегменти ріжуться на частини ≤ 500 символів.
     """
-    if not text.strip():
+    if not text or not text.strip():
         return text
     if not api_key:
         logging.error("API ключ DeepL не вказано!")
@@ -1323,52 +1326,76 @@ def translate_text_deepl(text, target_lang="RU", api_key=None, api_url=None):
     if not api_url:
         api_url = "https://api-free.deepl.com/v2/translate"
 
-    # Розбиваємо текст на шматки, щоб уникнути обмежень API
-    chunks = []
-    current = ""
-    for paragraph in text.split(". "):
-        if len(current) + len(paragraph) + 2 <= 500:
-            current += (". " if current else "") + paragraph
-        else:
-            if current:
-                chunks.append(current)
-            current = paragraph
-    if current:
-        chunks.append(current)
+    # 1) Розділити рядок на HTML-теги і прості текстові сегменти
+    #    Приклад: ["<p>", "Текст ", "<strong>", "жирний", "</strong>", "</p>"]
+    tokens = re.split(r'(<[^>]+>)', text)
+    out = []
 
-    translated_chunks = []
-    for chunk in chunks:
-        pattern = r'\b[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]\b|\b[a-zA-Z0-9]+\b'
+    # регексп для виявлення кирилиці (укр/ru)
+    has_cyrillic = re.compile(r'[А-Яа-яЁёЇїІіЄєҐґ]')
 
-        # Ті самі короткі <i> теги для ігнорування англійських слів
-        chunk_with_tags = re.sub(pattern, r'<i>\g<0></i>', chunk)
-
+    def translate_chunk(chunk: str) -> str:
+        """Перекласти один короткий текстовий шматок (≤500 символів)."""
+        # якщо немає кирилиці — повертаємо як є (англ/цифри не чіпаємо)
+        if not has_cyrillic.search(chunk):
+            return chunk
+        # жодних службових <i>-тегів усередину — працюємо з чистим текстом
         try:
-            response = requests.post(
+            resp = requests.post(
                 api_url,
                 data={
                     "auth_key": api_key,
-                    "text": chunk_with_tags,
+                    "text": chunk,
                     "target_lang": target_lang,
-                    # 🔹 ГОЛОВНА ЗМІНА — вказуємо HTML, не XML
-                    "tag_handling": "html",
-                    "ignore_tags": "i"
                 },
                 timeout=30
             )
-            response.raise_for_status()
-
-            translated_text = response.json()["translations"][0]["text"]
-
-            # Прибираємо службові теги <i>, якщо залишилися
-            translated_text = translated_text.replace("<i>", "").replace("</i>", "")
-            translated_chunks.append(translated_text)
-            time.sleep(0.5)
+            resp.raise_for_status()
+            translated = resp.json()["translations"][0]["text"]
+            # Якщо DeepL раптом повернув &lt;strong&gt; у тексті, розкодуємо сутності тільки в тексті
+            return html.unescape(translated)
         except Exception as e:
             logging.error(f"Помилка перекладу: {e}")
-            translated_chunks.append(chunk)
+            return chunk
 
-    return " ".join(translated_chunks)
+    # 2) Обробити кожен токен
+    for tok in tokens:
+        if not tok:
+            continue
+        if tok.startswith("<") and tok.endswith(">"):
+            # Це HTML-тег — повертаємо як є
+            out.append(tok)
+            continue
+
+        # Це простий текст — ріжемо на частини ≤ 500 символів по границях речень/рядків
+        text_part = tok
+        if not text_part.strip():
+            out.append(text_part)
+            continue
+
+        # м’яке речення/параграфне ділення
+        pieces = []
+        current = ""
+        # розбиваємо за кінцем речення або переносом, зберігаючи роздільники
+        for seg in re.split(r'(\. |\n)', text_part):
+            if len(current) + len(seg) <= 500:
+                current += seg
+            else:
+                if current:
+                    pieces.append(current)
+                current = seg
+        if current:
+            pieces.append(current)
+
+        # переклад кожного шматка
+        translated_pieces = []
+        for p in pieces:
+            translated_pieces.append(translate_chunk(p))
+            time.sleep(0.4)  # легкий тротлінг
+
+        out.append("".join(translated_pieces))
+
+    return "".join(out)
 
 def translate_csv_to_ru():
     """
@@ -2192,7 +2219,74 @@ def recheck_none_indexed_pages():
     logging.info(f"📤 Повторно відправлено: {reindexed}")
 
 
+# --- ПРЕЛОАД Fastcgi КЕШУ ---
+USER_AGENTS = {
+    "DESKTOP": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "MOBILE":  "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+}
 
+def _read_urls(file_path: str):
+    with open(file_path, "r", encoding="utf-8") as f:
+        return [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+
+def preload_cache_from_urls(source: int = 1, timeout: int = 20, pause_sec: float = 0.5):
+    """
+    Прелоад кешу Nginx БЕЗ очищення.
+    source=1 -> settings['paths']['base_url']
+    source=2 -> settings['paths']['product_url']
+    Для кожного URL дві перевірки (DESKTOP/MOBILE). Лог — через logging.info().
+    """
+    # 1) Підключаємо лог-хендлер до існуючого файлу (ВАЖЛИВО: без аргументів)
+    log_message_to_existing_file()
+
+    settings = load_settings()
+    if not settings:
+        logging.info("❌ Не вдалося завантажити settings.json для прелоаду кешу.")
+        return
+
+    paths = settings.get("paths", {})
+    if source == 1:
+        urls_file = paths.get("base_url")
+        source_name = "base_url"
+    elif source == 2:
+        urls_file = paths.get("product_url")
+        source_name = "product_url"
+    else:
+        logging.info("❌ Параметр source має бути 1 або 2.")
+        return
+
+    if not urls_file or not os.path.exists(urls_file):
+        logging.info(f"❌ Файл із URL не знайдено ({source_name}): {urls_file}")
+        return
+
+    urls = _read_urls(urls_file)
+    total = len(urls)
+    logging.info(f"🚀 Старт прелоаду кешу (source={source_name}, URLs={total})")
+
+    with requests.Session() as session:
+        session.headers.update({"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"})
+
+        for i, url in enumerate(urls, start=1):
+            for agent_name, agent_val in USER_AGENTS.items():
+                headers = {"User-Agent": agent_val}
+                t0 = time.perf_counter()
+                status = None
+                xfcc = "-"
+                try:
+                    resp = session.get(url, headers=headers, timeout=timeout)
+                    status = resp.status_code
+                    xfcc = resp.headers.get("X-FastCGI-Cache") or resp.headers.get("x-fastcgi-cache") or "-"
+                except requests.RequestException as e:
+                    status = "ERR"
+                    xfcc = f"ERR:{type(e).__name__}"
+                elapsed_ms = int((time.perf_counter() - t0) * 1000)
+
+                logging.info(f"[{i}/{total}][{agent_name}] {url} -> {status}, X-FastCGI-Cache={xfcc}, {elapsed_ms}ms")
+
+            if pause_sec and pause_sec > 0:
+                time.sleep(pause_sec)
+
+    logging.info("✅ Прелоад кешу завершено.")
 
 
 

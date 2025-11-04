@@ -1056,7 +1056,7 @@ def prepare_for_website_upload():
             rows = list(reader)
 
         today = datetime.now()
-        seven_days_later = today + timedelta(days=7)
+        seven_days_later = today + timedelta(days=9) # Тут змінюється кількість днів
         
         today_formatted = today.strftime("%Y-%m-%dT00:00:00")
         seven_days_later_formatted = seven_days_later.strftime("%Y-%m-%dT00:00:00")

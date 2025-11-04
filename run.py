@@ -1,7 +1,8 @@
 import argparse
 from scr.base_function import check_version, check_csv_data, export_product_by_id, update_image_seo_by_sku, translate_csv_to_ru, \
                         log_global_attributes, convert_local_attributes_to_global, test_search_console_access, \
-                        check_and_index_url_in_google, process_indexing_for_new_products, recheck_none_indexed_pages
+                        check_and_index_url_in_google, process_indexing_for_new_products, recheck_none_indexed_pages, \
+                        preload_cache_from_urls
 from scr.products import export_products, download_supplier_price_list, process_supplier_1_price_list, \
                         process_supplier_2_price_list, process_supplier_3_price_list, process_and_combine_all_data, \
                         prepare_for_website_upload, update_products
@@ -240,24 +241,34 @@ def main():
         help="Перевірити підключення до Google Search Console API."
     )
 
+    # ✨ Нова команда для перевірки індексації URL та надсилання у Google
     parser.add_argument(
         "--check-url-index",
         action="store_true",
         help="Перевірити сторінку на індексацію та за потреби надіслати у Google."
     )
 
+    # ✨ Нова команда для перевірки індексації нових товарів
     parser.add_argument(
         "--index-new-products",
         action="store_true",
         help="Перевірити індексацію нових товарів і відправити відсутні сторінки на індексацію."
     )
 
+    # ✨ Нова команда для повторної перевірки статусу індексації сторінок із none_index.csv
     parser.add_argument(
         "--recheck-index-status",
         action="store_true",
         help="Перевіряє none_index.csv та оновлює статус індексації у Google."
     )
 
+    # ✨ Додаємо нові аргументи для прелоаду кешу
+    parser.add_argument("--preload-cache", type=int, choices=[1, 2],
+                        help="1 = використати paths.base_url, 2 = paths.product_url")
+    parser.add_argument("--preload-timeout", type=int, default=20,
+                        help="HTTP timeout (сек)")
+    parser.add_argument("--preload-pause", type=float, default=0.5,
+                        help="Пауза між URL (сек)")
 
     # 3. Парсинг аргументів
     args = parser.parse_args()
@@ -415,6 +426,9 @@ def main():
         recheck_none_indexed_pages()
 
 
+    elif args.preload_cache:
+        print("⚡ Прелоад кешу Nginx...")
+        preload_cache_from_urls(source=args.preload_cache, timeout=args.preload_timeout, pause_sec=args.preload_pause)
 
     else:
         # Якщо аргументи не вказано, вивести довідку
