@@ -1,18 +1,10 @@
-import csv
-import os
-import time
-import requests
-import shutil
-import re
+import csv, os, time, requests, shutil, re, random, logging, html
 import pandas as pd
 import mysql.connector
 import pymysql
 import mimetypes
 from bs4 import BeautifulSoup
-import random 
 from PIL import Image
-import logging
-import html
 from typing import Dict, Tuple, List, Optional, Any
 from scr.base_function import get_wc_api, load_settings, setup_new_log_file, log_message_to_existing_file, load_attributes_csv, \
                                 save_attributes_csv, load_category_csv, save_category_csv, load_poznachky_csv, \
@@ -1608,7 +1600,7 @@ def create_new_products_batch():
     else:
         logging.info("✅ Створення нових товарів завершено успішно.")
 
-    # ... твоя основна логіка
+    # Повідомлення користувачу
     notify_user("Готово ✅", "Пакетне оновлення завершено", sound=True)
 
 def update_image_seo_from_csv():
@@ -1780,6 +1772,8 @@ def update_image_seo_from_csv():
     session.close()
 
     logging.info(f"🎯 Оновлення SEO (UA) завершено. Успішно оновлено: {updated_count}, не вдалося: {failed_count}.")
+    # Повідомлення користувачу
+    notify_user("Готово ✅", "Пакетне оновлення завершено", sound=True)
 
 def translate_and_prepare_new_prod_csv():
     """
@@ -1944,6 +1938,8 @@ def translate_and_prepare_new_prod_csv():
             conn.close()
         except:
             pass
+    # Повідомлення користувачу
+    notify_user("Готово ✅", "Пакетне оновлення завершено", sound=True)
 
 def upload_ru_translation_to_wp():
     """
@@ -2161,6 +2157,8 @@ def upload_ru_translation_to_wp():
             logging.info("🔒 HTTPS Session закрито.")
         except Exception:
             pass
+    # Повідомлення користувачу
+    notify_user("Готово ✅", "Пакетне оновлення завершено", sound=True)
 
 def update_image_seo_ru_from_csv():
     """
@@ -2312,3 +2310,7 @@ def update_image_seo_ru_from_csv():
             failed_count += 1
 
     logging.info(f"🎯 Завершено. Оновлено головних зображень: {updated_count}, помилок: {failed_count}")
+    # Повідомлення користувачу
+    notify_user("Готово ✅", "Пакетне оновлення завершено", sound=True)
+
+
