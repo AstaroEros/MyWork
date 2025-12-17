@@ -95,9 +95,10 @@ def oc_setup_new_log_file():
 
 
 # --- 4. ДОПИСУВАННЯ В ІСНУЮЧИЙ oc_logs.log ---
-def oc_log_message(message: str):
+def oc_log_message(message=None):
     """
-    Дописує повідомлення у існуючий лог-файл oc_logs.log
+    Дописує повідомлення у існуючий лог-файл oc_logs.log.
+    Якщо message не передано — просто ініціалізує лог.
     """
     log_path = "/var/www/scripts/update/logs/oc_logs.log"
     log_dir = os.path.dirname(log_path)
@@ -113,5 +114,6 @@ def oc_log_message(message: str):
             filemode="a"
         )
 
-    logging.info(message)
-    print(f"📝 {message}")
+    if message is not None:
+        logging.info(message)
+        print(f"📝 {message}")

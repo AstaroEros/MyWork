@@ -1,6 +1,7 @@
 import argparse
 
-from scr.oc_products import oc_export_products
+from scr.oc_products import oc_export_products, download_supplier_price_list, \
+                            process_supplier_1_price_list, process_supplier_2_price_list, process_supplier_3_price_list
 
 
 def main():
@@ -20,6 +21,32 @@ def main():
         help="Експортувати товари OpenCart у CSV файл згідно з обраним пресетом."
     )
 
+    parser.add_argument(
+        "--download-supplier",
+        nargs="?",
+        const=1,  # За замовчуванням ID постачальника = 1
+        type=int,
+        help="Завантажити прайс-лист від постачальника за його ID (наприклад, --download-supplier 1)."
+    )
+
+    parser.add_argument(
+        "--process-supplier-1",
+        action="store_true",
+        help="Обробка прайс-листа для постачальника 1."
+    )
+
+    parser.add_argument(
+        "--process-supplier-2",
+        action="store_true",
+        help="Обробка прайс-листа для постачальника 2."
+    )
+
+    parser.add_argument(
+        "--process-supplier-3",
+        action="store_true",
+        help="Обробка прайс-листа для постачальника 3 (конвертація .xls в .csv)."
+    )
+
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -28,6 +55,20 @@ def main():
     if args.oc_export:
         print("🚀 Запускаю експорт товарів OpenCart...")
         oc_export_products()
+
+    elif args.download_supplier:
+        print(f"🌐 Запускаю завантаження прайс-листа постачальника з ID {args.download_supplier}...")
+        download_supplier_price_list(args.download_supplier)
+    elif args.process_supplier_1:
+        print("⚙️ Запускаю обробку прайс-листа постачальника 1...")
+        process_supplier_1_price_list()
+
+    elif args.process_supplier_2:
+        print("⚙️ Запускаю обробку прайс-листа постачальника 2...")
+        process_supplier_2_price_list()
+    elif args.process_supplier_3:
+        print("⚙️ Запускаю обробку прайс-листа постачальника 3...")
+        process_supplier_3_price_list()
 
     else:
         print("❌ Не вказано жодної дії. Використайте --help для отримання списку команд.\n")
