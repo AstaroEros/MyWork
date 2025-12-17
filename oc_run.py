@@ -2,6 +2,7 @@ import argparse
 
 from scr.oc_products import oc_export_products, download_supplier_price_list, \
                             process_supplier_1_price_list, process_supplier_2_price_list, process_supplier_3_price_list
+from scr.oc_suppliers_1 import find_new_products
 
 
 def main():
@@ -47,6 +48,13 @@ def main():
         help="Обробка прайс-листа для постачальника 3 (конвертація .xls в .csv)."
     )
 
+    # ✨ Новий аргумент для пошуку нових товарів
+    parser.add_argument(
+        "--find-new-products",
+        action="store_true",
+        help="Знайти нові товари у прайс-листах, яких немає на сайті."
+    )
+
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -69,6 +77,10 @@ def main():
     elif args.process_supplier_3:
         print("⚙️ Запускаю обробку прайс-листа постачальника 3...")
         process_supplier_3_price_list()
+    # ✨ Нова логіка для пошуку нових товарів
+    elif args.find_new_products:
+        print("🔍 Запускаю пошук нових товарів...")
+        find_new_products()
 
     else:
         print("❌ Не вказано жодної дії. Використайте --help для отримання списку команд.\n")

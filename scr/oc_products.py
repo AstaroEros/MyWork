@@ -27,7 +27,7 @@ def oc_export_products():
         return
 
     presets = settings["presets"]
-    csv_path = settings.get("csv", {}).get("output_file", None)
+    csv_path = settings.get("paths", {}).get("output_file", None)
 
     # 3. Запитуємо пресет у користувача
     print("\nВиберіть пресет для експорту:\n")
