@@ -2,7 +2,7 @@ import argparse
 
 from scr.oc_products import oc_export_products, download_supplier_price_list, \
                             process_supplier_1_price_list, process_supplier_2_price_list, process_supplier_3_price_list
-from scr.oc_suppliers_1 import find_new_products
+from scr.oc_suppliers_1 import find_new_products, find_change_art_shtrihcod, find_product_url
 
 
 def main():
@@ -55,6 +55,20 @@ def main():
         help="Знайти нові товари у прайс-листах, яких немає на сайті."
     )
 
+    # 🆕 ПЕРЕВІРКА АРТИКУЛІВ І ШТРИХКОДІВ
+    parser.add_argument(
+        "--find-change-art-shtrihcod",
+        action="store_true",
+        help="Знайти товари з розбіжностями між артикулами та штрихкодами (сайт ↔ постачальник)."
+    )
+
+    # ✨ Додаємо новий аргумент для пошуку даних про товар
+    parser.add_argument(
+        "--find-product-url",
+        action="store_true",
+        help="Знайти URL нових товарів."
+    )
+
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -63,14 +77,12 @@ def main():
     if args.oc_export:
         print("🚀 Запускаю експорт товарів OpenCart...")
         oc_export_products()
-
     elif args.download_supplier:
         print(f"🌐 Запускаю завантаження прайс-листа постачальника з ID {args.download_supplier}...")
         download_supplier_price_list(args.download_supplier)
     elif args.process_supplier_1:
         print("⚙️ Запускаю обробку прайс-листа постачальника 1...")
         process_supplier_1_price_list()
-
     elif args.process_supplier_2:
         print("⚙️ Запускаю обробку прайс-листа постачальника 2...")
         process_supplier_2_price_list()
@@ -81,6 +93,14 @@ def main():
     elif args.find_new_products:
         print("🔍 Запускаю пошук нових товарів...")
         find_new_products()
+    elif args.find_change_art_shtrihcod:
+        print("🔎 Перевірка розбіжностей артикулів і штрихкодів...")
+        find_change_art_shtrihcod()
+
+    # ✨ Додаємо новий elif блок для запуску нової функції
+    elif args.find_product_url:
+        print("🔍 Запускаю пошук урл товару...")
+        find_product_url()
 
     else:
         print("❌ Не вказано жодної дії. Використайте --help для отримання списку команд.\n")

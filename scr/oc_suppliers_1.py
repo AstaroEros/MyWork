@@ -1,9 +1,144 @@
 import csv
 import logging
+import os
+import random
+import time
+import requests
+from bs4 import BeautifulSoup
 from scr.oc_base_function import (
     oc_log_message,
     load_oc_settings
 )
+
+import csv
+import logging
+from scr.oc_base_function import (
+    oc_log_message,
+    load_oc_settings
+)
+
+
+def find_change_art_shtrihcod():
+    """
+    Перевіряє розбіжності:
+    1) по штрихкоду (порівняння по артикулу)
+    2) по артикулу (порівняння по штрихкоду)
+    Усі розбіжності записує у change_art_shtrihcod
+    """
+
+    oc_log_message("▶ Старт перевірки артикулів і штрихкодів (2 напрямки)")
+    logging.info("find_change_art_shtrihcod START")
+
+    settings = load_oc_settings()
+    if not settings:
+        oc_log_message("❌ settings.json не завантажено")
+        return
+
+    site_csv = settings["paths"]["output_file"]
+    supplier_csv = settings["suppliers"]["1"]["csv_path"]
+    result_csv = settings["paths"]["change_art_shtrihcod"]
+
+    # --------------------------------------------------
+    # 1. Читаємо прайс постачальника
+    # --------------------------------------------------
+    supplier_by_artykul = {}   # Код_товара -> Штрих_код
+    supplier_by_shtrih = {}    # Штрих_код  -> Код_товара
+
+    with open(supplier_csv, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f, delimiter=";")
+
+        for row in reader:
+            artykul = row.get("Код_товара", "").strip()
+            shtrih = row.get("Штрих_код", "").strip()
+
+            if artykul and shtrih:
+                supplier_by_artykul[artykul] = shtrih
+                supplier_by_shtrih[shtrih] = artykul
+
+    oc_log_message(
+        f"ℹ Товарів постачальника: "
+        f"{len(supplier_by_artykul)} (по артикулу), "
+        f"{len(supplier_by_shtrih)} (по штрихкоду)"
+    )
+
+    # --------------------------------------------------
+    # 2. Очищення файлу результату
+    # --------------------------------------------------
+    headers = [
+        "sku",
+        "shtrih_cod",
+        "artykul_lutsk",
+        "Код_товара",
+        "Штрих_код"
+    ]
+
+    with open(result_csv, "w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow(headers)
+
+    oc_log_message("🧹 change_art_shtrihcod очищено")
+
+    # --------------------------------------------------
+    # 3. Порівняння (2 напрямки)
+    # --------------------------------------------------
+    checked = 0
+    diff_count = 0
+    written_keys = set()  # захист від дублів
+
+    with open(site_csv, newline="", encoding="utf-8") as site_f, \
+         open(result_csv, "a", newline="", encoding="utf-8") as out_f:
+
+        site_reader = csv.DictReader(site_f)
+        writer = csv.writer(out_f)
+
+        for row in site_reader:
+            sku = row.get("sku", "").strip()
+            site_shtrih = row.get("shtrih_cod", "").strip()
+            site_artykul = row.get("artykul_lutsk", "").strip()
+
+            # ---------- ПРАВИЛО 1 ----------
+            # Є артикул → порівнюємо штрихкод
+            if site_artykul and site_artykul in supplier_by_artykul:
+                checked += 1
+                supplier_shtrih = supplier_by_artykul[site_artykul]
+
+                if site_shtrih != supplier_shtrih:
+                    key = (sku, site_artykul, supplier_shtrih)
+                    if key not in written_keys:
+                        writer.writerow([
+                            sku,
+                            site_shtrih,
+                            site_artykul,
+                            site_artykul,
+                            supplier_shtrih
+                        ])
+                        written_keys.add(key)
+                        diff_count += 1
+
+            # ---------- ПРАВИЛО 2 ----------
+            # Є штрихкод → порівнюємо артикул
+            if site_shtrih and site_shtrih in supplier_by_shtrih:
+                checked += 1
+                supplier_artykul = supplier_by_shtrih[site_shtrih]
+
+                if site_artykul != supplier_artykul:
+                    key = (sku, site_shtrih, supplier_artykul)
+                    if key not in written_keys:
+                        writer.writerow([
+                            sku,
+                            site_shtrih,
+                            site_artykul,
+                            supplier_artykul,
+                            site_shtrih
+                        ])
+                        written_keys.add(key)
+                        diff_count += 1
+
+    # --------------------------------------------------
+    # 4. Підсумок
+    # --------------------------------------------------
+    oc_log_message(f"✅ Перевірено позицій: {checked}")
+    oc_log_message(f"⚠ Знайдено розбіжностей: {diff_count}")
+    logging.info("find_change_art_shtrihcod END")
 
 def find_new_products():
     """
@@ -106,3 +241,141 @@ def find_new_products():
         logging.info(f"❌ Помилка: Файл не знайдено - {e}")
     except Exception as e:
         logging.info(f"❌ Виникла непередбачена помилка: {e}")
+
+def find_product_url():
+    """
+    Зчитує файл з новими товарами, переходить за URL-адресою,
+    знаходить URL-адресу простого або варіативного товару,
+    і записує знайдену URL-адресу в колонку B(1) в тимчасовий файл.
+    """
+
+    # --- 1. Ініціалізація логування (підключаємо існуючий лог-файл) ---
+    oc_log_message()
+    logging.info("ФУНКЦІЯ 2. Починаю пошук URL-адрес товарів...")
+    
+    # --- 2. Завантаження налаштувань та формування шляхів/тимчасового файлу ---
+    settings = load_oc_settings()
+    supliers_new_path = settings['paths']['csv_path_supliers_1_new']  # вхідний CSV (1.csv)
+    site_url = settings['suppliers']['1']['site']                     # базовий URL сайту (щоб додавати відносні посилання)
+    temp_file_path = supliers_new_path + '.temp'                      # тимчасовий файл під час запису
+
+    # --- Лічильники і статистика ---
+    total_rows = 0
+    found_variant_count = 0
+    found_simple_count = 0
+    not_found_count = 0
+    found_variant_rows = []
+    not_found_rows = []
+
+    try:
+        # --- 3. Відкриваємо вхідний файл для читання ---
+        with open(supliers_new_path, mode='r', encoding='utf-8') as input_file:
+            reader = csv.reader(input_file)
+            headers = next(reader)  # читаємо і зберігаємо заголовки (щоб переписати в тимчасовий файл)
+
+            # --- 4. Відкриваємо тимчасовий файл для поступового запису результатів ---
+            with open(temp_file_path, mode='w', encoding='utf-8', newline='') as output_file:
+                writer = csv.writer(output_file)
+                writer.writerow(headers) # записуємо заголовки у тимчасовий файл
+
+                # --- 5. Ітерація по рядках вхідного файлу ---
+                for idx, row in enumerate(reader):
+                    total_rows += 1
+                    # 5.1. Витягуємо ключові поля із рядка
+                    search_url = row[0].strip()    # у вихідному файлі у колонці A може бути "посилання для пошуку"
+                    file_sku = row[5].strip()      # артикул (SKU) з колонки, яка відповідає індексу 5
+
+                    # --- 6. Перевірка валідності URL для пошуку ---
+                    # Якщо URL пустий або вже позначений як помилка запиту, пропускаємо рядок
+                    if not search_url or search_url.startswith('Помилка запиту'):
+                        writer.writerow(row)
+                        continue
+
+                    try:
+                        # --- 7. Виконання HTTP-запиту до search_url і парсинг HTML ---
+                        response = requests.get(search_url)
+                        response.raise_for_status()
+                        soup = BeautifulSoup(response.text, 'html.parser')
+                        found_type = None  # 'variant' або 'simple'
+                        found_url = None  # сюди запишемо знайдену реальну URL-адресу товару
+                        
+                        # --- 8. Пошук варіативних товарів (input.variant_control[data-code]) ---
+                        # Шукаємо input теги з класом variant_control та атрибутом data-code,
+                        # порівнюємо data-code з file_sku — якщо співпадіння, беремо посилання у батьківському блоці.
+                        variant_inputs = soup.find_all('input', class_='variant_control', attrs={'data-code': True})
+                        for input_tag in variant_inputs:
+                            site_sku = input_tag.get('data-code', '').strip()
+                            if file_sku == site_sku:
+                                parent_div = input_tag.find_parent('div', class_='card-block')
+                                if parent_div:
+                                    link_tag = parent_div.find('h4', class_='card-title').find('a')
+                                    if link_tag and link_tag.has_attr('href'):
+                                        # Формуємо повний URL (додаємо site_url до відносного шляху)
+                                        found_url = site_url + link_tag['href']
+                                        found_type = 'variant'
+                                        break
+
+                        # --- 9. Якщо не знайшли серед варіантів — шукаємо прості товари ---
+                        if not found_url:
+                            # Для простих товарів шукаємо div з класом 'radio', беремо текст як SKU,
+                            # і за таким же підходом знаходимо посилання у блоці card-block.
+                            simple_divs = soup.find_all('div', class_='radio')
+                            for div_tag in simple_divs:
+                                site_sku = div_tag.get_text(strip=True).strip()
+                                if file_sku == site_sku:
+                                    parent_div = div_tag.find_parent('div', class_='card-block')
+                                    if parent_div:
+                                        link_tag = parent_div.find('h4', class_='card-title').find('a')
+                                        if link_tag and link_tag.has_attr('href'):
+                                            found_url = site_url + link_tag['href']
+                                            found_type = 'simple'
+                                            break
+
+                        # --- 10. Запис результату у колонку B (індекс 1) або логування якщо не знайдено ---
+                        if found_url:
+                            row[1] = found_url
+                            if found_type == 'variant':
+                                found_variant_count += 1
+                                found_variant_rows.append(idx + 2)  # +2, бо рядки CSV рахуються з 1 + заголовок
+                            elif found_type == 'simple':
+                                found_simple_count += 1
+                        else:
+                            not_found_count += 1
+                            not_found_rows.append(idx + 2)
+
+                        # Записуємо (знайдений або незмінений) рядок у тимчасовий файл
+                        writer.writerow(row)
+
+                    except requests.RequestException as e:
+                        # --- 11. Обробка помилок HTTP-запиту: логування та маркування рядка ---
+                        logging.error(f"Рядок {idx + 2}: Помилка при запиті до урл: {e}")
+                        row[0] = f'Помилка запиту: {e}'  # позначаємо поле пошуку як помилкове
+                        writer.writerow(row)
+                    
+                    # --- 12. Додаткова пауза між запитами (рандомізована) для уникнення бана/DDOS ---
+                    time.sleep(random.uniform(1, 3))
+  
+        # --- 13. Після успішної обробки: заміна оригінального файлу тимчасовим ---
+        os.replace(temp_file_path, supliers_new_path)
+
+        # --- 14. Зведена статистика ---
+        logging.info("=== ПІДСУМКОВА ІНФОРМАЦІЯ ===")
+        logging.info(f"Всього рядків з товарами: {total_rows}")
+        logging.info(
+            f"Знайдено URL варіативних товарів: {found_variant_count}"
+            + (f" (Рядки {', '.join(map(str, found_variant_rows))})" if found_variant_rows else "")
+        )
+        logging.info(f"Знайдено URL простих товарів: {found_simple_count}")
+        logging.info(
+            f"Не знайдено URL: {not_found_count}"
+            + (f" (Рядки {', '.join(map(str, not_found_rows))})" if not_found_rows else "")
+        )
+
+    except FileNotFoundError as e:
+        # --- 15. Обробка помилки: вхідний файл не знайдено ---
+        logging.error(f"Помилка: Файл не знайдено - {e}")
+    except Exception as e:
+        # --- 16. Гарантійне прибирання: видаляємо тимчасовий файл при помилці, щоб не залишити сміття ---
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+        logging.error(f"Виникла непередбачена помилка: {e}")
