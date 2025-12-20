@@ -5,18 +5,7 @@ import random
 import time
 import requests
 from bs4 import BeautifulSoup
-from scr.oc_base_function import (
-    oc_log_message,
-    load_oc_settings
-)
-
-import csv
-import logging
-from scr.oc_base_function import (
-    oc_log_message,
-    load_oc_settings
-)
-
+from scr.oc_base_function import oc_log_message, load_oc_settings, load_attributes_csv, save_attributes_csv
 
 def find_change_art_shtrihcod():
     """
@@ -379,3 +368,192 @@ def find_product_url():
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
         logging.error(f"Виникла непередбачена помилка: {e}")
+
+def parse_product_attributes():
+    """
+    Парсить сторінки товарів, застосовує заміну з attribute.csv (блочна структура)
+    і додає нові невідомі значення одразу перед наступним блоком-заголовком.
+
+    """
+
+    # --- 0. Лог старту ---
+    oc_log_message("▶ ФУНКЦІЯ: Парсинг атрибутів товарів (без штрих-кодів)")
+    logging.info("Починаю парсинг сторінок товарів для вилучення атрибутів")
+
+    # --- 1. Завантаження налаштувань ---
+    settings = load_oc_settings()
+    try:
+        supliers_new_path = settings["paths"]["csv_path_supliers_1_new"]
+        product_data_map = settings["suppliers"]["1"]["product_data_columns"]
+        other_attrs_index = settings["suppliers"]["1"]["other_attributes_column"]
+    except (TypeError, KeyError) as e:
+        logging.error(f"Помилка доступу до налаштувань settings.json: {e}")
+        return
+
+    # --- 2. Мапа оброблюваних атрибутів (без штрих-коду) ---
+    processing_map = {
+        attr_name: col_index
+        for attr_name, col_index in product_data_map.items()
+        if attr_name != "Штрих-код"
+    }
+
+    # --- 3. Завантаження attribute.csv ---
+    replacements_map, raw_data = load_attributes_csv()
+    changes_made = False
+    max_raw_row_len = len(raw_data[0]) if raw_data and raw_data[0] else 10
+
+    # --- 4. Підготовка точок вставки для нових атрибутів ---
+    insertion_points = {}
+    current_col_index = None
+
+    for i, row in enumerate(raw_data[1:], start=1):
+        if row and row[0].strip().isdigit():
+            col_index = int(row[0].strip())
+            if current_col_index is not None and current_col_index not in insertion_points:
+                insertion_points[current_col_index] = i
+            current_col_index = col_index
+            insertion_points[col_index] = i + 1
+        elif current_col_index is not None:
+            insertion_points[current_col_index] = i + 1
+
+    logging.debug(f"Точки вставки attribute.csv: {insertion_points}")
+
+    # --- 5. Лічильник нових атрибутів ---
+    new_attributes_counter = {}  # {col_index: count}
+
+    # --- 6. Обробка CSV постачальника ---
+    temp_file_path = supliers_new_path + ".temp"
+
+    try:
+        with open(supliers_new_path, mode="r", encoding="utf-8") as input_file, \
+             open(temp_file_path, mode="w", encoding="utf-8", newline="") as output_file:
+
+            reader = csv.reader(input_file)
+            writer = csv.writer(output_file)
+
+            headers = next(reader)
+            writer.writerow(headers)
+
+            for idx, row in enumerate(reader, start=2):  # start=2 → з урахуванням заголовка
+                product_url = row[1].strip() if len(row) > 1 else ""
+
+                # --- Розширення рядка при необхідності ---
+                max_index = max(
+                    max(product_data_map.values(), default=0),
+                    other_attrs_index
+                )
+                if len(row) <= max_index:
+                    row.extend([""] * (max_index + 1 - len(row)))
+
+                # --- Пропуск некоректних URL ---
+                if not product_url or product_url.startswith("Помилка запиту"):
+                    writer.writerow(row)
+                    continue
+
+                try:
+                    # --- 6.1 Запит сторінки ---
+                    response = requests.get(product_url, timeout=10)
+                    response.raise_for_status()
+                    soup = BeautifulSoup(response.text, "html.parser")
+
+                    characteristics_div = soup.find("div", id="w0-tab0")
+                    parsed_attributes = {}
+
+                    if characteristics_div and characteristics_div.find("table"):
+                        for tr in characteristics_div.find("table").find_all("tr"):
+                            cells = tr.find_all("td")
+                            if len(cells) == 2:
+                                key = cells[0].get_text(strip=True).replace(":", "")
+                                value = cells[1].get_text(strip=True)
+                                parsed_attributes[key] = value
+
+                    other_attributes = []
+
+                    # --- 6.2 Обробка атрибутів ---
+                    for attr_name, attr_value in parsed_attributes.items():
+
+                        # ❗ Повністю ігноруємо штрих-код
+                        if attr_name == "Штрих-код":
+                            continue
+
+                        target_col_index = processing_map.get(attr_name)
+                        original_value_lower = attr_value.strip().lower()
+
+                        if target_col_index is not None:
+                            replacement_rules = replacements_map.get(target_col_index, {})
+                            new_value = replacement_rules.get(original_value_lower)
+
+                            if new_value:
+                                row[target_col_index] = new_value
+                            else:
+                                if original_value_lower not in replacement_rules:
+                                    insert_index = insertion_points.get(target_col_index)
+
+                                    if insert_index is None:
+                                        logging.error(
+                                            f"Атрибут '{attr_value}' (I={target_col_index}) "
+                                            f"не додано: відсутня точка вставки"
+                                        )
+                                        row[target_col_index] = attr_value
+                                        continue
+
+                                    new_raw_row = [""] * max_raw_row_len
+                                    new_raw_row[2] = original_value_lower
+                                    raw_data.insert(insert_index, new_raw_row)
+
+                                    replacements_map.setdefault(
+                                        target_col_index, {}
+                                    )[original_value_lower] = ""
+
+                                    changes_made = True
+
+                                    # Зсув точок вставки
+                                    for col, point in insertion_points.items():
+                                        if point >= insert_index:
+                                            insertion_points[col] += 1
+
+                                    new_attributes_counter[target_col_index] = (
+                                        new_attributes_counter.get(target_col_index, 0) + 1
+                                    )
+
+                                row[target_col_index] = attr_value
+                        else:
+                            other_attributes.append(f"{attr_name}:{attr_value}")
+
+                    if other_attributes:
+                        row[other_attrs_index] = ", ".join(other_attributes)
+
+                    writer.writerow(row)
+
+                except requests.RequestException as req_err:
+                    logging.error(f"Помилка запиту URL {product_url}: {req_err}")
+                    writer.writerow(row)
+
+                except Exception as e:
+                    logging.error(f"Помилка парсингу URL {product_url}: {e}")
+                    writer.writerow(row)
+
+                time.sleep(random.uniform(1, 3))
+
+        # --- 7. Заміна файлу ---
+        os.replace(temp_file_path, supliers_new_path)
+        logging.info("Парсинг атрибутів завершено. CSV постачальника оновлено.")
+
+        # --- 8. Збереження attribute.csv ---
+        if changes_made:
+            save_attributes_csv(raw_data)
+        else:
+            logging.info("attribute.csv не змінювався.")
+
+        # --- 9. Підсумкове логування ---
+        if new_attributes_counter:
+            logging.info("Додані нові атрибути:")
+            for col_index, count in sorted(new_attributes_counter.items()):
+                logging.info(f"Колонка {col_index}: +{count}")
+        else:
+            logging.info("Нових атрибутів не додано.")
+
+    except Exception as e:
+        logging.error(f"Критична помилка виконання: {e}")
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)

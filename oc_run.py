@@ -1,8 +1,9 @@
 import argparse
 
+from scr.oc_base_function import oc_import_categories_from_csv
 from scr.oc_products import oc_export_products, download_supplier_price_list, \
                             process_supplier_1_price_list, process_supplier_2_price_list, process_supplier_3_price_list
-from scr.oc_suppliers_1 import find_new_products, find_change_art_shtrihcod, find_product_url
+from scr.oc_suppliers_1 import find_new_products, find_change_art_shtrihcod, find_product_url, parse_product_attributes
 
 
 def main():
@@ -69,6 +70,20 @@ def main():
         help="Знайти URL нових товарів."
     )
 
+    # ✨ Додаємо новий аргумент для парсингу атрибутів
+    parser.add_argument(
+        "--parse-attributes",
+        action="store_true",
+        help="Парсити сторінки товарів для вилучення атрибутів."
+    )
+
+    # ✨ Додаємо новий аргумент для імпорту категорій з CSV                        
+    parser.add_argument(
+    "--import-categories",
+    action="store_true",
+    help="Імпортувати категорії з CSV напряму в БД OpenCart."
+    )
+    
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -89,18 +104,21 @@ def main():
     elif args.process_supplier_3:
         print("⚙️ Запускаю обробку прайс-листа постачальника 3...")
         process_supplier_3_price_list()
-    # ✨ Нова логіка для пошуку нових товарів
     elif args.find_new_products:
         print("🔍 Запускаю пошук нових товарів...")
         find_new_products()
     elif args.find_change_art_shtrihcod:
         print("🔎 Перевірка розбіжностей артикулів і штрихкодів...")
         find_change_art_shtrihcod()
-
-    # ✨ Додаємо новий elif блок для запуску нової функції
     elif args.find_product_url:
         print("🔍 Запускаю пошук урл товару...")
         find_product_url()
+    elif args.parse_attributes:
+        print("⚙️ Запускаю парсинг атрибутів...")
+        parse_product_attributes()
+    elif args.import_categories:
+        print("📂 Імпорт категорій у OpenCart...")
+        oc_import_categories_from_csv()
 
     else:
         print("❌ Не вказано жодної дії. Використайте --help для отримання списку команд.\n")

@@ -299,7 +299,12 @@ def load_attributes_csv():
     1. replacements_map: Словник {col_index: {original_value: new_value}} для швидкого пошуку.
     2. raw_data: Список сирих рядків для збереження структури файлу.
     """
-    attribute_path = get_config_path('attribute.csv')
+    settings = load_settings()
+    if not settings or "paths" not in settings or "attribute" not in settings["paths"]:
+        logging.error("❌ У settings.json не знайдено paths.attribute")
+        return {}, []
+
+    attribute_path = settings["paths"]["attribute"]
     replacements_map = {}
     raw_data = []          
     
@@ -359,7 +364,11 @@ def save_attributes_csv(raw_data):
     """
     Зберігає оновлені сирі дані у attribute.csv.
     """
-    attribute_path = get_config_path('attribute.csv')
+    settings = load_settings()
+    if not settings or "paths" not in settings or "attribute" not in settings["paths"]:
+        logging.error("❌ У settings.json не знайдено paths.attribute")
+        return {}, []
+    attribute_path = settings["paths"]["attribute"]
     try:
         # 'newline=''' важливий для коректного збереження CSV на різних ОС
         with open(attribute_path, 'w', encoding='utf-8', newline='') as f:
