@@ -4,7 +4,7 @@ from scr.oc_base_function import oc_import_categories_from_csv, check_csv_data
 from scr.oc_products import oc_export_products, download_supplier_price_list, \
                             process_supplier_1_price_list, process_supplier_2_price_list, process_supplier_3_price_list
 from scr.oc_suppliers_1 import find_new_products, find_change_art_shtrihcod, find_product_url, parse_product_attributes, apply_final_standardization, \
-                                fill_product_category, refill_product_category, separate_existing_products
+                                fill_product_category, refill_product_category, separate_existing_products, assign_new_sku_to_products
 
 
 def main():
@@ -119,6 +119,13 @@ def main():
     action="store_true",
     help="Звірити SL_new.csv з базою (zalishki.csv) за штрихкодом, перенести існуючі товари у old_prod_new_SHK.csv та видалити їх з SL_new.csv."
     )
+    
+    # ✨ НОВИЙ АРГУМЕНТ для присвоєння нових SKU
+    parser.add_argument(
+    "--assign-sku",
+    action="store_true",
+    help="Знайти найбільший SKU у zalishki.csv та присвоїти послідовні SKU новим товарам у new.csv (колонка P/15)."
+    )
 
     # 3. Парсинг аргументів
     args = parser.parse_args()
@@ -173,6 +180,10 @@ def main():
     elif args.separate_existing: 
         print("🔍 Запускаю звірку штрихкодів з базою та перенесення існуючих товарів...")
         separate_existing_products()
+    elif args.assign_sku:
+        print("🔢 Запускаю присвоєння нових SKU...")
+        assign_new_sku_to_products()
+
     else:
         print("❌ Не вказано жодної дії. Використайте --help для отримання списку команд.\n")
         parser.print_help()

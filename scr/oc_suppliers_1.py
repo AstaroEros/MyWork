@@ -1036,3 +1036,91 @@ def separate_existing_products():
         logging.error(f"Непередбачена помилка під час обробки 1.csv: {e}")
         if 'temp_path' in locals() and os.path.exists(temp_path):
             os.remove(temp_path)
+
+def assign_new_sku_to_products():
+    """
+    Знаходить найбільший SKU у zalishki.csv (сортує по колонці B(1))
+    і присвоює послідовні SKU товарам без SKU у колонці P(15) файлу 1.csv.
+    """
+    oc_log_message()
+    logging.info("ФУНКЦІЯ 8. Починаю присвоєння нових SKU товарам у 1.csv...")
+
+    # --- 1. Завантаження налаштувань ---
+    settings = load_oc_settings()
+    try:
+        sl_new_path = settings['paths']['csv_path_supliers_1_new']
+        zalishki_path = settings['paths']['output_file']
+    except KeyError as e:
+        logging.error(f"Помилка конфігурації. Не знайдено шлях: {e}")
+        return
+
+    # --- 2. Визначення індексу SKU у 1.csv ---
+    SKU_COL_INDEX = 15  # P
+    ZALISHKI_SKU_INDEX = 1  # B
+
+    # --- 3. Знаходимо максимальний SKU у zalishki.csv ---
+    try:
+        with open(zalishki_path, mode='r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            next(reader, None)  # пропускаємо заголовок
+            sku_list = []
+            for row in reader:
+                if len(row) > ZALISHKI_SKU_INDEX:
+                    val = row[ZALISHKI_SKU_INDEX].strip()
+                    if val.isdigit():
+                        sku_list.append(int(val))
+
+            if not sku_list:
+                logging.warning("У базі не знайдено жодного числового SKU. Присвоєння неможливе.")
+                return
+
+            sku_list.sort()
+            last_sku = sku_list[-1]
+            logging.info(f"Максимальний SKU у базі: {last_sku}")
+
+    except FileNotFoundError:
+        logging.error(f"Файл бази zalishki.csv не знайдено за шляхом: {zalishki_path}")
+        return
+    except Exception as e:
+        logging.error(f"Помилка при читанні zalishki.csv: {e}")
+        return
+
+    # --- 4. Присвоєння нових SKU у 1.csv ---
+    next_sku = last_sku + 1
+    assigned_count = 0
+    temp_path = sl_new_path + '.temp'
+
+    try:
+        with open(sl_new_path, mode='r', encoding='utf-8', newline='') as input_file:
+            reader = csv.reader(input_file)
+            header = next(reader, None)
+            rows = [header] if header else []
+
+            for row in reader:
+                if len(row) <= SKU_COL_INDEX:
+                    row.extend([''] * (SKU_COL_INDEX + 1 - len(row)))
+
+                current_sku = row[SKU_COL_INDEX].strip()
+                if not current_sku:
+                    row[SKU_COL_INDEX] = str(next_sku)
+                    assigned_count += 1
+                    next_sku += 1
+
+                rows.append(row)
+
+        # --- 5. Запис оновленого CSV ---
+        if assigned_count > 0:
+            with open(temp_path, mode='w', encoding='utf-8', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerows(rows)
+            os.replace(temp_path, sl_new_path)
+            logging.info(f"✅ Успішно присвоєно {assigned_count} нових SKU. Наступний SKU буде {next_sku}.")
+        else:
+            logging.info("Усі товари вже мають SKU. Змін не внесено.")
+
+    except FileNotFoundError:
+        logging.error(f"Файл 1.csv не знайдено за шляхом")
+    except Exception as e:
+        logging.error(f"Непередбачена помилка під час присвоєння SKU: {e}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
