@@ -916,3 +916,123 @@ def refill_product_category():
         logging.error(f"Непередбачена помилка при повторному заповненні: {e}")
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+def separate_existing_products():
+    """
+    Звіряє штрихкоди 1.csv з базою (zalishki.csv),
+    переносить знайдені товари у old_prod_new_SHK.csv,
+    видаляє їх з 1.csv та формує підсумкову статистику.
+    Колонки та відповідності old -> new винесені у settings.json.
+    """
+    oc_log_message()
+    logging.info("ФУНКЦІЯ 7. Починаю звірку 1.csv зі штрихкодами бази (zalishki.csv)...")
+
+    settings = load_oc_settings()
+    try:
+        sl_new_path = settings['paths']['csv_path_supliers_1_new']
+        zalishki_path = settings['paths']['output_file']
+        sl_old_prod_shk_path = settings['paths']['csv_path_sl_old_prod_new_shk']
+        column_mapping = settings['suppliers']['1']['column_mapping_sl_old_to_sl_new']
+    except KeyError as e:
+        logging.error(f"Помилка конфігурації. Не знайдено шлях або мапу колонок: {e}")
+        return
+
+    # --- 0. Зчитування існуючого заголовка old_prod_new_SHK.csv ---
+    sl_old_header = []
+    try:
+        if os.path.exists(sl_old_prod_shk_path):
+            with open(sl_old_prod_shk_path, mode='r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                sl_old_header = next(reader, [])
+        else:
+            logging.warning("Файл old_prod_new_SHK.csv не знайдено — створюю новий із заголовком за замовчуванням.")
+            sl_old_header_base = [
+                'id', 'sku', 'Мета: url_lutsk', 'Мета: shtrih_cod', 'Мета: artykul_lutsk', 'Позначки',
+                'rank_math_focus_keyword', 'Мета: postachalnyk', 'manage_stock', 'tax_status', 'excerpt'
+            ]
+            # Додаємо атрибути та додаткові колонки (без attribute_none)
+            sl_old_header = sl_old_header_base + [f'attribute_{i}' for i in range(1, 24)] + [
+                'content', 'post_date', 'product_type'
+            ]
+
+        # Очищаємо файл, але залишаємо заголовок
+        with open(sl_old_prod_shk_path, mode='w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(sl_old_header)
+
+        logging.info("Файл old_prod_new_SHK.csv очищено, заголовок залишено без змін.")
+    except Exception as e:
+        logging.error(f"Помилка при ініціалізації old_prod_new_SHK.csv: {e}")
+        return
+
+    # --- 1. Зчитування бази штрихкодів ---
+    zalishki_map = {}  # {shk: (id, sku)}
+    try:
+        with open(zalishki_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            next(reader)  # пропускаємо заголовок
+            for row in reader:
+                if len(row) > 7:
+                    shk = row[7].strip()
+                    if shk:
+                        zalishki_map[shk] = (row[0].strip(), row[1].strip())
+        logging.info(f"Зчитано {len(zalishki_map)} унікальних штрихкодів з бази.")
+    except Exception as e:
+        logging.error(f"Помилка при читанні бази: {e}")
+        return
+
+    # --- 2. Обробка 1.csv та формування списків ---
+    items_to_keep = []
+    items_to_move = []
+
+    try:
+        with open(sl_new_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            header = next(reader)
+            items_to_keep.append(header)
+
+            for row in reader:
+                # Розширюємо рядок до максимального індексу у мапі
+                max_index = max(column_mapping.values())
+                if len(row) <= max_index:
+                    row.extend([''] * (max_index + 1 - len(row)))
+
+                shk_value = row[2].strip()  # C (Штрихкод)
+                if shk_value in zalishki_map:
+                    item_id, item_sku = zalishki_map[shk_value]
+
+                    # Формуємо новий рядок для old_prod_new_SHK.csv
+                    new_row = [''] * len(sl_old_header)
+                    new_row[0] = item_id
+                    new_row[1] = item_sku
+
+                    for sl_old_idx_str, sl_new_idx in column_mapping.items():
+                        sl_old_idx = int(sl_old_idx_str)  # перетворюємо ключ у int
+                        if sl_new_idx < len(row):
+                            new_row[sl_old_idx] = row[sl_new_idx]
+
+                    items_to_move.append(new_row)
+                else:
+                    items_to_keep.append(row)
+
+        # --- 3. Запис перенесених товарів ---
+        if items_to_move:
+            with open(sl_old_prod_shk_path, 'a', encoding='utf-8', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerows(items_to_move)
+            logging.info(f"Перенесено {len(items_to_move)} існуючих товарів у old_prod_new_SHK.csv.")
+        else:
+            logging.info("Не знайдено жодного товару з існуючим штрихкодом у базі.")
+
+        # --- 4. Запис оновленого 1.csv ---
+        temp_path = sl_new_path + '.temp'
+        with open(temp_path, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerows(items_to_keep)
+        os.replace(temp_path, sl_new_path)
+        logging.info(f"1.csv оновлено. Залишилось {len(items_to_keep)-1} нових товарів для імпорту.")
+
+    except Exception as e:
+        logging.error(f"Непередбачена помилка під час обробки 1.csv: {e}")
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            os.remove(temp_path)

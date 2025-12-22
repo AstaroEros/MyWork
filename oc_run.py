@@ -1,10 +1,10 @@
 import argparse
 
-from scr.oc_base_function import oc_import_categories_from_csv
+from scr.oc_base_function import oc_import_categories_from_csv, check_csv_data
 from scr.oc_products import oc_export_products, download_supplier_price_list, \
                             process_supplier_1_price_list, process_supplier_2_price_list, process_supplier_3_price_list
 from scr.oc_suppliers_1 import find_new_products, find_change_art_shtrihcod, find_product_url, parse_product_attributes, apply_final_standardization, \
-                                fill_product_category, refill_product_category
+                                fill_product_category, refill_product_category, separate_existing_products
 
 
 def main():
@@ -48,6 +48,13 @@ def main():
         "--process-supplier-3",
         action="store_true",
         help="Обробка прайс-листа для постачальника 3 (конвертація .xls в .csv)."
+    )
+
+    # Оновлений аргумент для перевірки CSV
+    parser.add_argument(
+        "--check-csv",
+        type=str,
+        help="Перевірити CSV-файл за ID профілю (наприклад, '1')."
     )
 
     # ✨ Новий аргумент для пошуку нових товарів
@@ -106,6 +113,13 @@ def main():
     help="Повторно заповнити колонки Категорія (Q) та pa_used (AV) на основі оновлених правил у category.csv."
     )
 
+    # ✨ НОВИЙ АРГУМЕНТ для звірки штрихкодів
+    parser.add_argument( 
+    "--separate-existing",
+    action="store_true",
+    help="Звірити SL_new.csv з базою (zalishki.csv) за штрихкодом, перенести існуючі товари у old_prod_new_SHK.csv та видалити їх з SL_new.csv."
+    )
+
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -114,6 +128,12 @@ def main():
     if args.oc_export:
         print("🚀 Запускаю експорт товарів OpenCart...")
         oc_export_products()
+    elif args.check_csv:
+        print(f"⚙️ Запускаю перевірку CSV-файлу з профілем '{args.check_csv}'...")
+        if check_csv_data(args.check_csv):
+            print("✅ Перевірка успішна. Файл валідний.")
+        else:
+            print("❌ Перевірка не пройшла. Перегляньте лог-файл для деталей.")
     elif args.download_supplier:
         print(f"🌐 Запускаю завантаження прайс-листа постачальника з ID {args.download_supplier}...")
         download_supplier_price_list(args.download_supplier)
@@ -150,6 +170,9 @@ def main():
     elif args.refill_category: 
         print("🔄 Запускаю повторне заповнення категорій та pa_used...")
         refill_product_category()
+    elif args.separate_existing: 
+        print("🔍 Запускаю звірку штрихкодів з базою та перенесення існуючих товарів...")
+        separate_existing_products()
     else:
         print("❌ Не вказано жодної дії. Використайте --help для отримання списку команд.\n")
         parser.print_help()

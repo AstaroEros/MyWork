@@ -511,3 +511,146 @@ def load_poznachky_csv():
         logging.error(f"Виникла помилка при завантаженні poznachky.csv: {e}")
         return []
 
+# --- ПЕРЕВІРКА CSV ---
+def check_csv_data(profile_id):
+    """
+    Перевіряє CSV-файл на відповідність правилам, визначеним у oc_settings.json.
+
+    Args:
+        profile_id (str): ID профілю перевірки з 'validation_profiles' в oc_settings.json.
+
+    Returns:
+        bool: True, якщо перевірка пройшла успішно, інакше False.
+    """
+
+    # 0. Ініціалізація логування
+    oc_log_message(f"🔎 Старт перевірки CSV (профіль: {profile_id})")
+
+    # 1. Завантаження налаштувань
+    settings = load_oc_settings()
+    if not settings:
+        oc_log_message("❌ Не вдалося завантажити oc_settings.json")
+        return False
+
+    profiles = settings.get("validation_profiles", {})
+    if profile_id not in profiles:
+        oc_log_message(f"❌ Не знайдено профіль валідації з ID '{profile_id}'")
+        return False
+
+    # 2. Дані профілю
+    profile = profiles[profile_id]
+    csv_path_relative = profile.get("path")
+    validation_rules = profile.get("rules")
+
+    if not csv_path_relative or validation_rules is None:
+        oc_log_message("❌ Неповні дані в профілі валідації")
+        return False
+
+    # 3. Перевірка файлу
+    base_dir = os.path.join(os.path.dirname(__file__), "..")
+    full_csv_path = os.path.join(base_dir, csv_path_relative)
+
+    if not os.path.exists(full_csv_path):
+        oc_log_message(f"❌ CSV файл не знайдено: {full_csv_path}")
+        return False
+
+    oc_log_message(f"📄 Перевіряється файл: {full_csv_path}")
+
+    # 4. Читання та валідація CSV
+    try:
+        with open(full_csv_path, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+
+            try:
+                headers = next(reader)
+            except StopIteration:
+                oc_log_message("❌ CSV файл порожній (відсутні заголовки)")
+                return False
+
+            # 5. Перевірка заголовків
+            expected_columns = list(validation_rules.keys())
+            headers_set = set(headers)
+
+            for col_name in expected_columns:
+                if col_name not in headers_set:
+                    oc_log_message(f"❌ Відсутня обовʼязкова колонка: '{col_name}'")
+                    return False
+
+            header_map = {name: idx for idx, name in enumerate(headers)}
+
+            # 6. Перевірка рядків
+            for i, row in enumerate(reader):
+                row_number = i + 2
+
+                if not row or all(not col.strip() for col in row):
+                    oc_log_message(f"ℹ️ Рядок {row_number} порожній — пропущено")
+                    continue
+
+                for col_name, rule_type in validation_rules.items():
+                    col_index = header_map.get(col_name)
+
+                    if col_index is None or col_index >= len(row):
+                        oc_log_message(f"❌ Рядок {row_number}: некоректна структура CSV")
+                        return False
+
+                    value = row[col_index].strip()
+
+                    # 6.1 not_empty
+                    if rule_type == "not_empty":
+                        if not value:
+                            oc_log_message(f"❌ Рядок {row_number}, '{col_name}': поле не повинно бути порожнім")
+                            return False
+                        continue
+
+                    # 6.2 integer
+                    if rule_type == "integer":
+                        if not value or not value.lstrip("-").isdigit():
+                            oc_log_message(
+                                f"❌ Рядок {row_number}, '{col_name}': очікується ціле число, отримано '{value}'"
+                            )
+                            return False
+
+                    # 6.3 integer_or_empty
+                    elif rule_type == "integer_or_empty":
+                        if value and not value.lstrip("-").isdigit():
+                            oc_log_message(
+                                f"❌ Рядок {row_number}, '{col_name}': очікується ціле число або порожнє поле"
+                            )
+                            return False
+
+                    # 6.4 float_or_empty
+                    elif rule_type == "float_or_empty":
+                        if value:
+                            try:
+                                float(value.replace(",", "."))
+                            except ValueError:
+                                oc_log_message(
+                                    f"❌ Рядок {row_number}, '{col_name}': очікується float або порожнє поле"
+                                )
+                                return False
+
+                    # 6.5 datetime
+                    elif rule_type == "datetime":
+                        if value:
+                            try:
+                                datetime.strptime(value, "%Y-%m-%dT%H:%M:%S")
+                            except ValueError:
+                                oc_log_message(
+                                    f"❌ Рядок {row_number}, '{col_name}': невірний формат datetime"
+                                )
+                                return False
+
+                    # 6.6 список допустимих значень
+                    elif isinstance(rule_type, list):
+                        if value not in rule_type:
+                            oc_log_message(
+                                f"❌ Рядок {row_number}, '{col_name}': значення '{value}' не входить у {rule_type}"
+                            )
+                            return False
+
+    except Exception as e:
+        oc_log_message(f"❌ Невідома помилка під час перевірки CSV: {e}")
+        return False
+
+    oc_log_message("✅ Перевірка CSV успішна")
+    return True
