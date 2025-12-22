@@ -3,7 +3,8 @@ import argparse
 from scr.oc_base_function import oc_import_categories_from_csv
 from scr.oc_products import oc_export_products, download_supplier_price_list, \
                             process_supplier_1_price_list, process_supplier_2_price_list, process_supplier_3_price_list
-from scr.oc_suppliers_1 import find_new_products, find_change_art_shtrihcod, find_product_url, parse_product_attributes
+from scr.oc_suppliers_1 import find_new_products, find_change_art_shtrihcod, find_product_url, parse_product_attributes, apply_final_standardization, \
+                                fill_product_category, refill_product_category
 
 
 def main():
@@ -83,7 +84,28 @@ def main():
     action="store_true",
     help="Імпортувати категорії з CSV напряму в БД OpenCart."
     )
+
+    # ✨ НОВИЙ АРГУМЕНТ для фінальної стандартизації
+    parser.add_argument(
+    "--standardize-final",
+    action="store_true",
+    help="Застосувати фінальні правила заміни з attribute.csv до new.csv."
+    )
     
+    # ✨ НОВИЙ АРГУМЕНТ для заповнення категорій
+    parser.add_argument(
+    "--fill-categories",
+    action="store_true",
+    help="Заповнити колонку Q (Категорія) на основі комбінацій M, N, O та category.csv."
+    )
+
+    # ✨ НОВИЙ АРГУМЕНТ для ПОВТОРНОГО заповнення категорій
+    parser.add_argument( 
+    "--refill-category",
+    action="store_true",
+    help="Повторно заповнити колонки Категорія (Q) та pa_used (AV) на основі оновлених правил у category.csv."
+    )
+
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -119,7 +141,15 @@ def main():
     elif args.import_categories:
         print("📂 Імпорт категорій у OpenCart...")
         oc_import_categories_from_csv()
-
+    elif args.standardize_final:
+        print("✅ Запускаю фінальну стандартизацію SL_new.csv...")
+        apply_final_standardization()
+    elif args.fill_categories:
+        print("🗂️ Запускаю заповнення категорій...")
+        fill_product_category()
+    elif args.refill_category: 
+        print("🔄 Запускаю повторне заповнення категорій та pa_used...")
+        refill_product_category()
     else:
         print("❌ Не вказано жодної дії. Використайте --help для отримання списку команд.\n")
         parser.print_help()

@@ -4,8 +4,11 @@ import os
 import random
 import time
 import requests
+import re
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
-from scr.oc_base_function import oc_log_message, load_oc_settings, load_attributes_csv, save_attributes_csv
+from scr.oc_base_function import oc_log_message, load_oc_settings, load_attributes_csv, save_attributes_csv, \
+                                load_category_csv, save_category_csv, load_poznachky_csv
 
 def find_change_art_shtrihcod():
     """
@@ -557,3 +560,359 @@ def parse_product_attributes():
         logging.error(f"Критична помилка виконання: {e}")
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
+
+def apply_final_standardization():
+    """
+    Застосовує фінальні правила стандартизації з attribute.csv до файлу 1.csv.
+    Замінює атрибути на значення з колонки 'attr_site_name', якщо воно існує.
+    Проігноровані атрибути (з порожнім 'attr_site_name') очищаються.
+    Атрибути, для яких не знайдено правил, залишаються без змін.
+    Логування включає інформацію про кількість замін та очищень.
+    """
+    oc_log_message()
+    logging.info("ФУНКЦІЯ 4. Починаю фінальну стандартизацію атрибутів у 1.csv...")
+
+    # --- 1. Завантаження налаштувань ---
+    settings = load_oc_settings()
+    try:
+        csv_path = settings['paths']['csv_path_supliers_1_new']
+        product_map = settings['suppliers']['1']['product_data_columns']
+    except TypeError as e:
+        logging.error(f"Помилка доступу до налаштувань: {e}")
+        return
+
+    # --- 2. Підготовка мапи для обробки (без Штрих-коду) ---
+    processing_map = {k: v for k, v in product_map.items() if k != "Штрих-код"}
+
+    # --- 3. Завантаження правил заміни ---
+    replacements_map, _ = load_attributes_csv()
+
+    # --- 4. Підготовка статистики замін ---
+    replacement_counter = {}  # {col_index: count}
+    cleared_counter = {}      # {col_index: count}
+
+    # --- 5. Обробка CSV ---
+    temp_file_path = csv_path + '.final_temp'
+    try:
+        with open(csv_path, 'r', encoding='utf-8') as infile, \
+             open(temp_file_path, 'w', encoding='utf-8', newline='') as outfile:
+
+            reader = csv.reader(infile)
+            writer = csv.writer(outfile)
+            headers = next(reader)
+            writer.writerow(headers)
+
+            # Словник для логування назв колонок
+            column_names = {index: name for name, index in processing_map.items()}
+
+            for idx, row in enumerate(reader):
+                max_index = max(product_map.values(), default=0)
+                if len(row) <= max_index:
+                    row.extend([''] * (max_index + 1 - len(row)))
+
+                for col_index, rules in replacements_map.items():
+                    if col_index >= len(row):
+                        continue
+
+                    current_value = row[col_index].strip()
+                    if not current_value:
+                        continue
+
+                    current_lower = current_value.lower()
+                    col_name = column_names.get(col_index, f"I={col_index}")
+                    new_value = rules.get(current_lower)
+
+                    if new_value is not None:
+                        if new_value:
+                            if new_value != current_value:
+                                row[col_index] = new_value
+                                replacement_counter[col_index] = replacement_counter.get(col_index, 0) + 1
+                                logging.info(f"Рядок {idx + 2}: ЗАМІНА ({col_name}): '{current_value}' -> '{new_value}'")
+                        else:
+                            row[col_index] = ""
+                            cleared_counter[col_index] = cleared_counter.get(col_index, 0) + 1
+                            logging.warning(f"Рядок {idx + 2}: ІГНОРУВАННЯ/ОЧИЩЕННЯ ({col_name}): '{current_value}' очищено")
+
+                writer.writerow(row)
+
+        os.replace(temp_file_path, csv_path)
+        logging.info("Фінальна стандартизація завершена. csv оновлено.")
+
+        # --- 6. Підсумкове логування ---
+        if replacement_counter:
+            for col, count in sorted(replacement_counter.items()):
+                logging.info(f"Атрибут {col}: виконано {count} замін")
+        if cleared_counter:
+            for col, count in sorted(cleared_counter.items()):
+                logging.info(f"Атрибут {col}: очищено {count} значень")
+
+    except FileNotFoundError as e:
+        logging.error(f"Файл не знайдено: {e}")
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+    except Exception as e:
+        logging.error(f"Непередбачена помилка при стандартизації: {e}")
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+def fill_product_category():
+    """
+    Заповнює службові колонки у csv:
+    - Q (категорія) на основі M, N, O
+    - T (позначки) на основі назви товару G
+    - U (Rank Math) на основі назви товару G
+    - AV (pa_used) на основі category.csv
+    - V, W, X, Y, AZ фіксованими значеннями
+    - Z (короткий опис) з H
+    - AX (дата)
+    Працює тільки для постачальника з ID=1
+    """
+    oc_log_message()
+    logging.info("ФУНКЦІЯ 5. Починаю заповнення категорії та службових колонок...")
+
+    settings = load_oc_settings()
+    try:
+        csv_path = settings['paths']['csv_path_supliers_1_new']
+        supplier_id = 1
+        name_ukr = settings['suppliers']['1']['name_ukr']
+    except (TypeError, KeyError) as e:
+        logging.error(f"Помилка налаштувань: {e}")
+        return
+
+    # Індекси колонок
+    M, N, O = 12, 13, 14
+    G, H = 6, 7
+    Q, T, U = 16, 19, 20
+    Z, V, W, X, Y = 25, 21, 22, 23, 24
+    AV, AX, AZ = 47, 49, 51
+
+    # Завантаження правил категорій і позначок
+    category_map, raw_category = load_category_csv()
+    rules_category = category_map.get(supplier_id, {})
+    poznachky_list = load_poznachky_csv()
+    changes_category = False
+    max_row_len_category = len(raw_category[0]) if raw_category else 5
+
+    # Створюємо мапу для pa_used
+    pa_used_map = {}
+    for row in raw_category:
+        if len(row) > 5 and (row[0].strip() == str(supplier_id) or row[0].strip() == ''):
+            key = tuple(v.strip().lower() for v in row[1:4])
+            pa_used_map[key] = row[5].strip()
+
+    logging.info(f"Завантажено {len(pa_used_map)} правил pa_used")
+
+    current_date = datetime.now().strftime('%Y-%m-%dT00:00:00')
+
+    # Функція для вставки нового рядка у category.csv
+    def get_insert_index(supplier_id, raw_data):
+        insert_index = len(raw_data)
+        found_block = False
+        for i, r in enumerate(raw_data):
+            if r and r[0].strip().isdigit():
+                try:
+                    cur_id = int(r[0].strip())
+                    if cur_id == supplier_id:
+                        found_block = True
+                        insert_index = i + 1
+                    elif cur_id > supplier_id and found_block:
+                        return i
+                except ValueError:
+                    continue
+            elif found_block:
+                insert_index = i + 1
+        return insert_index
+
+    temp_path = csv_path + '.category_temp'
+    try:
+        with open(csv_path, 'r', encoding='utf-8') as infile, \
+             open(temp_path, 'w', encoding='utf-8', newline='') as outfile:
+
+            reader = csv.reader(infile)
+            writer = csv.writer(outfile)
+            headers = next(reader)
+            writer.writerow(headers)
+
+            for idx, row in enumerate(reader):
+                # Розширюємо рядок за потреби
+                max_col = max(M, N, O, Q, T, U, V, W, X, Y, Z, AV, AX, AZ, G, H)
+                if len(row) <= max_col:
+                    row.extend([''] * (max_col + 1 - len(row)))
+
+                product_name = row[G].strip()
+                product_desc = row[H]
+
+                key = tuple(row[i].strip().lower() for i in (M, N, O))
+
+                # --- Категорія Q ---
+                category_val = rules_category.get(key)
+                if category_val is not None:
+                    row[Q] = category_val or ""
+                else:
+                    # Додаємо новий рядок у category.csv
+                    insert_idx = get_insert_index(supplier_id, raw_category)
+                    new_row = [''] + list(row[M:O+1]) + [''] * (max_row_len_category - 4)
+                    raw_category.insert(insert_idx, new_row)
+                    rules_category[key] = ""
+                    changes_category = True
+                    logging.warning(f"Рядок {idx + 2}: Додана нова комбінація категорії {key}")
+
+                # --- Позначки T ---
+                if product_name and poznachky_list:
+                    found_tags = []
+                    covered = []
+                    name_lower = product_name.lower()
+                    for tag in poznachky_list:
+                        if tag in name_lower:
+                            start, end = name_lower.find(tag), name_lower.find(tag) + len(tag)
+                            if not any(s <= start and end <= e for s, e in covered):
+                                found_tags.append(tag.capitalize())
+                                covered.append((start, end))
+                                covered.sort(key=lambda x: x[1]-x[0], reverse=True)
+                    if found_tags:
+                        row[T] = ', '.join(found_tags)
+
+                # --- Rank Math U ---
+                if product_name:
+                    cleaned = re.sub(r'[а-яА-Я0-9]', '', product_name)
+                    cleaned = re.sub(r'[^a-zA-Z\s]', '', cleaned)
+                    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+                    row[U] = cleaned
+
+                # --- pa_used AV ---
+                pa_val = pa_used_map.get(key)
+                if pa_val:
+                    row[AV] = pa_val
+
+
+                # --- Фіксовані колонки ---
+                row[V] = name_ukr
+                row[W] = "draft"
+                row[X] = "yes"
+                row[Y] = "none"
+                row[AZ] = "simple"
+                row[AX] = current_date
+
+                # --- Короткий опис Z ---
+                if product_desc:
+                    row[Z] = product_desc.split('\\n', 1)[0].strip()
+                else:
+                    row[Z] = ""
+
+                writer.writerow(row)
+
+        os.replace(temp_path, csv_path)
+        logging.info("Заповнення категорій та службових колонок завершено.")
+
+        if changes_category:
+            save_category_csv(raw_category)
+        else:
+            logging.info("Збереження category.csv не потрібне. Змін: False.")
+
+    except Exception as e:
+        logging.error(f"Помилка при заповненні колонок: {e}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+def refill_product_category():
+    """
+    Повторно заповнює колонки Q (Категорія) та AV (pa_used) у 1.csv
+    на основі оновлених правил у category.csv.
+    НЕ додає нові рядки у category.csv.
+    Логування показує, які рядки оновлені.
+    """
+    oc_log_message()
+    logging.info("Функція 6. Починаю повторне заповнення категорій та pa_used у 1.csv...")
+
+    # --- 1. Завантаження налаштувань ---
+    settings = load_oc_settings()
+    try:
+        csv_path = settings['paths']['csv_path_supliers_1_new']
+        supplier_id = 1
+    except (TypeError, KeyError) as e:
+        logging.error(f"Помилка доступу до налаштувань: {e}")
+        return
+
+    # --- 2. Індекси колонок CSV ---
+    # Використовуємо одразу числа, без довгих змінних
+    M, N, O = 12, 13, 14        # name_1, name_2, name_3
+    Q, AV = 16, 47              # Категорія та pa_used
+    max_index = max(M, N, O, Q, AV)
+    missing_category_rows = []  # список рядків з порожньою категорією
+
+    # --- 3. Завантаження правил категорій та pa_used ---
+    category_map, raw_category = load_category_csv()
+    rules_category = {}
+    pa_used_map = {}
+    supplier_str = str(supplier_id)
+
+    for row in raw_category:
+        if len(row) > 5:
+            supplier_value = row[0].strip()
+            if supplier_value == supplier_str or supplier_value == '':
+                key = tuple(v.strip().lower() for v in row[1:4])  # комбінація M,N,O
+                rules_category[key] = row[4].strip() if len(row) > 4 else ""
+                pa_used_map[key] = row[5].strip() if len(row) > 5 else ""
+
+    logging.info(f"Зчитано {len(rules_category)} правил для Категорії (Q) та {len(pa_used_map)} правил для pa_used (AV)")
+
+    # --- 4. Обробка CSV ---
+    temp_path = csv_path + '.refill_temp'
+    updated_rows = 0
+
+    try:
+        with open(csv_path, 'r', encoding='utf-8') as infile, \
+             open(temp_path, 'w', encoding='utf-8', newline='') as outfile:
+
+            reader = csv.reader(infile)
+            writer = csv.writer(outfile)
+
+            headers = next(reader)
+            writer.writerow(headers)
+
+            for idx, row in enumerate(reader):
+                # Розширюємо рядок, щоб не виходити за межі
+                if len(row) <= max_index:
+                    row.extend([''] * (max_index + 1 - len(row)))
+
+                # --- 4.1 Ключ пошуку ---
+                key = tuple(row[i].strip().lower() for i in (M, N, O))
+                initial_category = row[Q].strip()
+                initial_pa_used = row[AV].strip()
+                row_changed = False
+
+                # --- 4.2 Повторне заповнення Категорії Q ---
+                category_val = rules_category.get(key)
+                if category_val and category_val != initial_category:
+                    row[Q] = category_val
+                    row_changed = True
+                    logging.info(f"Рядок {idx + 2}: Q (Категорія) оновлено. Ключ: {key}, Значення: '{category_val}'")
+
+                # --- 4.3 Повторне заповнення pa_used AV ---
+                pa_val = pa_used_map.get(key)
+                if pa_val and pa_val != initial_pa_used:
+                    row[AV] = pa_val
+                    row_changed = True
+                    logging.info(f"Рядок {idx + 2}: AV (pa_used) оновлено. Ключ: {key}, Значення: '{pa_val}'")
+
+                # Перевірка порожньої категорії після оновлення
+                if not row[Q].strip():
+                    missing_category_rows.append(idx + 2)  # зберігаємо номер рядка у файлі
+
+                if row_changed:
+                    updated_rows += 1
+
+                writer.writerow(row)
+
+        # --- 5. Замінюємо оригінальний CSV ---
+        os.replace(temp_path, csv_path)
+        logging.info(f"Повторне заповнення завершено. Оновлено {updated_rows} рядків.")
+
+        # --- Логування рядків з порожньою категорією ---
+        for row_num in missing_category_rows:
+            logging.warning(f"УВАГА рядок {row_num} не заповнена категорія!")
+
+    except Exception as e:
+        logging.error(f"Непередбачена помилка при повторному заповненні: {e}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
