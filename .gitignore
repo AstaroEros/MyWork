@@ -9,13 +9,14 @@
 config/erosckua-4dfc5adf62de.json
 config/settings.json
 config/attribute.json
-config/oc_settings.json
+oc_config/oc_settings.json
 scr/__pycache__
 venv/
 *.xls
 *.xlsx
 *.zip
 *.tar.gz
+*.yaml
 *.env
 .DS_Store
 .idea/

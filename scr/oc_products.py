@@ -1,92 +1,131 @@
-import csv
-import html
-import os
-import re
+import csv, pymysql, html, os, re, logging, requests, shutil
 import pandas as pd
-import logging
-import requests
-import shutil
-from scr.oc_base_function import (
-    oc_setup_new_log_file,
-    oc_log_message,
-    oc_connect_db,
-    load_oc_settings
-)
+from scr.oc_base_function import oc_setup_new_log_file, oc_log_message, oc_connect_db, load_oc_settings
 
-
+# ГОЛОВНА ФУНКЦІЯ 1: Експорт товарів з бд
 def oc_export_products():
+    """
+    Основна функція експорту товарів:
+    1. Налаштовує новий лог.
+    2. Читає налаштування та пресети.
+    3. Виконує SQL запит.
+    4. Зберігає результат у CSV.
+    """
 
-    # 1. Створюємо новий лог
+    # 1. Створюємо новий лог (ініціалізація logging)
     oc_setup_new_log_file()
-    oc_log_message("▶ Старт експорту товарів OpenCart")
+    
+    start_msg = "▶ Старт експорту товарів OpenCart"
+    logging.info(start_msg)
+    print(start_msg)
 
     # 2. Завантажуємо налаштування
     settings = load_oc_settings()
     if not settings or "presets" not in settings:
-        print("❌ Не знайдено пресети в oc_settings.json")
+        err_msg = "❌ Не знайдено пресети в oc_settings.yaml"
+        logging.error(err_msg)
+        print(err_msg)
         return
 
     presets = settings["presets"]
-    csv_path = settings.get("paths", {}).get("output_file", None)
+    # Отримуємо базовий шлях для CSV
+    csv_base_path = settings["paths"]["output_file"]
 
-    # 3. Запитуємо пресет у користувача
+    # 3. Вибір пресету
     print("\nВиберіть пресет для експорту:\n")
-
     for key, preset in presets.items():
-        print(f"{key} - {preset['name']}")
+        print(f" [{key}] - {preset['name']}")
 
-    preset_id = input("\nВаш вибір: ").strip()
-    
+    user_input = input("\nВаш вибір: ").strip()
 
-    if preset_id not in presets:
-        oc_log_message(f"❌ Невідомий пресет: {preset_id}")
-        print("Помилка: неправильний номер пресету.")
+    # --- ВИПРАВЛЕННЯ: РОЗУМНИЙ ПОШУК КЛЮЧА ---
+    # Спочатку припускаємо, що ключа немає
+    preset_id = None
+
+    # 1. Перевіряємо, чи є такий ключ як рядок (на випадок ключів типу "all")
+    if user_input in presets:
+        preset_id = user_input
+    else:
+        # 2. Якщо ні, пробуємо перетворити введення на число (для ключів 1, 2...)
+        try:
+            user_input_int = int(user_input)
+            if user_input_int in presets:
+                preset_id = user_input_int
+        except ValueError:
+            pass # Це було не число, і такого рядка теж немає
+
+    # Якщо після перевірок preset_id все ще None — це помилка
+    if preset_id is None:
+        err_msg = f"❌ Невідомий номер пресету: {user_input}"
+        logging.warning(err_msg)
+        print(err_msg)
         return
 
     sql = presets[preset_id]["sql"]
     preset_name = presets[preset_id]["name"]
 
-    oc_log_message(f"▶ Обраний пресет {preset_id}: {preset_name}")
+    info_msg = f"▶ Обраний пресет [{preset_id}]: {preset_name}"
+    logging.info(info_msg)
+    print(info_msg)
 
-    # 4. Підключення до бази
+    # 4. Підключення до бази та виконання запиту
     conn = oc_connect_db()
     if not conn:
-        oc_log_message("❌ Неможливо підключитися до БД")
+        logging.error("❌ Неможливо підключитися до БД (conn is None)")
         return
 
-    cursor = conn.cursor()
-    cursor.execute(sql)
-    rows = cursor.fetchall()
+    try:
+        with conn.cursor() as cursor:
+            logging.info("⏳ Виконується SQL запит...")
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+    except pymysql.MySQLError as e:
+        err_sql = f"❌ Помилка виконання SQL: {e}"
+        logging.error(err_sql)
+        print(err_sql)
+        return
+    finally:
+        # Завжди закриваємо з'єднання
+        conn.close()
+        logging.info("🔌 З'єднання з БД закрито.")
 
-    # 5. Підготовка CSV-файлу
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-
-    # 6. Запис CSV — з декодуванням HTML
+    # 5. Запис CSV
     if rows:
-        with open(csv_path, "w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=list(rows[0].keys()),
-                quoting=csv.QUOTE_MINIMAL,  # ← Заголовки без лапок, дані — тільки коли треба
-                delimiter=",",              # або ";" — як хочеш
-                escapechar="\\"
-            )
+        try:
+            with open(csv_base_path, "w", encoding="utf-8", newline="") as f:
+                # Беремо заголовки з ключів першого рядка
+                fieldnames = list(rows[0].keys())
+                
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=fieldnames,
+                    quoting=csv.QUOTE_MINIMAL,
+                    delimiter=",",
+                    escapechar="\\"
+                )
 
-            writer.writeheader()
+                writer.writeheader()
 
-            for row in rows:
-                decoded_row = {
-                    k: html.unescape(v) if isinstance(v, str) else v
-                    for k, v in row.items()
-                }
+                for row in rows:
+                    # Декодування HTML сутностей (наприклад &quot; -> ")
+                    decoded_row = {
+                        k: html.unescape(v) if isinstance(v, str) else v
+                        for k, v in row.items()
+                    }
+                    writer.writerow(decoded_row)
 
-                writer.writerow(decoded_row)
+            success_msg = f"✔ Експорт успішно виконано: {len(rows)} записів."
+            logging.info(success_msg)
+            print(f"{success_msg}\n📁 Файл: {csv_base_path}")
 
-        oc_log_message(f"✔ Експорт виконано: {len(rows)} записів")
-        print(f"Готово! Записано {len(rows)} рядків у {csv_path}")
+        except IOError as e:
+            err_io = f"❌ Помилка запису файлу: {e}"
+            logging.error(err_io)
+            print(err_io)
     else:
-        oc_log_message("⚠ Результат пустий")
-        print("Немає записів для експорту.")
+        empty_msg = "⚠ Результат SQL запиту пустий. Файл не створено."
+        logging.warning(empty_msg)
+        print(empty_msg)
 
 def download_supplier_price_list(supplier_id):
     """
