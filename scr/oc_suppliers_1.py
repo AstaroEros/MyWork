@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 from scr.oc_base_function import oc_log_message, load_oc_settings, load_attributes_csv, save_attributes_csv, \
                                 load_category_csv, save_category_csv, load_poznachky_csv
 
+# ОСНОВНА ФУНКЦІЯ 1: Перевірка зміни артикулу і штрихкоду
 def find_change_art_shtrihcod():
     """
     Перевіряє розбіжності:
@@ -18,16 +19,16 @@ def find_change_art_shtrihcod():
     Усі розбіжності записує у change_art_shtrihcod
     """
 
-    oc_log_message("▶ Старт перевірки артикулів і штрихкодів (2 напрямки)")
-    logging.info("find_change_art_shtrihcod START")
+    oc_log_message()
+    logging.info("▶ Старт перевірки артикулів і штрихкодів (2 напрямки)")
 
     settings = load_oc_settings()
     if not settings:
-        oc_log_message("❌ settings.json не завантажено")
+        logging.info("❌ oc_settings.yaml не завантажено")
         return
 
     site_csv = settings["paths"]["output_file"]
-    supplier_csv = settings["suppliers"]["1"]["csv_path"]
+    supplier_csv = settings["suppliers"][1]["csv_path"]
     result_csv = settings["paths"]["change_art_shtrihcod"]
 
     # --------------------------------------------------
@@ -47,7 +48,7 @@ def find_change_art_shtrihcod():
                 supplier_by_artykul[artykul] = shtrih
                 supplier_by_shtrih[shtrih] = artykul
 
-    oc_log_message(
+    logging.info(
         f"ℹ Товарів постачальника: "
         f"{len(supplier_by_artykul)} (по артикулу), "
         f"{len(supplier_by_shtrih)} (по штрихкоду)"
@@ -67,7 +68,7 @@ def find_change_art_shtrihcod():
     with open(result_csv, "w", newline="", encoding="utf-8") as f:
         csv.writer(f).writerow(headers)
 
-    oc_log_message("🧹 change_art_shtrihcod очищено")
+    logging.info("🧹 change_art_shtrihcod очищено")
 
     # --------------------------------------------------
     # 3. Порівняння (2 напрямки)
@@ -128,10 +129,10 @@ def find_change_art_shtrihcod():
     # --------------------------------------------------
     # 4. Підсумок
     # --------------------------------------------------
-    oc_log_message(f"✅ Перевірено позицій: {checked}")
-    oc_log_message(f"⚠ Знайдено розбіжностей: {diff_count}")
-    logging.info("find_change_art_shtrihcod END")
+    logging.info(f"✅ Перевірено позицій: {checked}")
+    logging.info(f"⚠ Знайдено розбіжностей: {diff_count}")
 
+# ОСНОВНА ФУНКЦІЯ 2: Знаходження нових товарів
 def find_new_products():
     """
     Порівнює артикули товарів з прайс-листа постачальника з артикулами,
@@ -143,86 +144,93 @@ def find_new_products():
     
     # --- 2. Завантаження налаштувань з settings.json ---
     settings = load_oc_settings()
+    if not settings:
+        logging.info("❌ oc_settings.yaml не завантажено")
+        return
     
     # --- 3. Отримання шляхів до потрібних файлів ---
-    zalishki_path = settings['paths']['output_file']                   # База існуючих товарів
-    supliers_new_path = settings['paths']['csv_path_supliers_1_new']         # Файл, куди буде записано нові товари
-    supliers_csv_path = settings['suppliers']['1']['csv_path']               # Прайс-лист постачальника 1
-    delimiter = settings['suppliers']['1']['delimiter']                      # Роздільник у CSV
+    zalishki_path = settings['paths']['output_file']                         # База існуючих товарів
+    supliers_new_path = settings['paths']['csv_path_new_product']         # Файл, куди буде записано нові товари
+    supliers_csv_path = settings['suppliers'][1]['csv_path']                 # Прайс-лист постачальника 1
+    delimiter = settings['suppliers'][1]['delimiter']                        # Роздільник у CSV
     
     # --- 4. Отримання допоміжних параметрів постачальника ---
-    sku_prefix = settings['suppliers']['1']['search']                        # Префікс для пошуку
+    sku_prefix = settings['suppliers'][1]['search']                          # Префікс для пошуку
        
-    # --- 5. Отримання структури заголовків нового файлу ---
-    new_product_headers = [
-        settings['column_supliers_1_new_name'][str(i)]
-        for i in range(len(settings['column_supliers_1_new_name']))
-    ]
-    num_new_columns = len(new_product_headers)
-
     logging.info("Зчитую існуючі артикули з файлу, вказаного за ключем 'csv_path_zalishki'.")
 
     try:
-        # --- 6. Зчитування існуючих артикулів із бази (zalishki.csv) ---
+
+        # --- 3. Зчитування заголовків з файлу нових товарів ---
+        fieldnames = []
+        with open(supliers_new_path, mode='r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            try:
+                fieldnames = next(reader) # Отримуємо список назв колонок: ['search', 'url_lutsk', ...]
+            except StopIteration:
+                logging.info("❌ Файл для запису порожній.")
+                return
+
+        logging.info(f"Структуру файлу зчитано. Колонок: {len(fieldnames)}")
+
+        # --- 4. Зчитування існуючих артикулів із бази (ОНОВЛЕНО) ---
+        logging.info("Зчитую базу існуючих товарів...")
         with open(zalishki_path, mode='r', encoding='utf-8') as zalishki_file:
-            zalishki_reader = csv.reader(zalishki_file)
-            next(zalishki_reader, None)  # пропускаємо заголовок
-            existing_skus = {row[9].strip().lower() for row in zalishki_reader if len(row) > 9}
+            # Використовуємо DictReader, щоб звертатися по назві
+            zalishki_reader = csv.DictReader(zalishki_file)
+
+            existing_skus = {
+                row.get("artykul_lutsk", "").strip().lower() 
+                for row in zalishki_reader 
+                if row.get("artykul_lutsk")
+            }
+            
             logging.info(f"Зчитано {len(existing_skus)} унікальних артикулів із бази.")
 
-        # --- 7. Підготовка нового файлу для запису нових товарів ---
+        # --- 5. Відкриваємо файл для запису (DictWriter) ---
         logging.info("Відкриваю файл для запису нових товарів...")
         with open(supliers_new_path, mode='w', encoding='utf-8', newline='') as new_file:
-            writer = csv.writer(new_file)
-            writer.writerow(new_product_headers)  # записуємо заголовки
+            # Ініціалізуємо Writer, передаючи йому список заголовків
+            writer = csv.DictWriter(new_file, fieldnames=fieldnames)
+            writer.writeheader() # Записуємо заголовки назад у файл
             
-            # --- 8. Зчитування прайс-листа постачальника ---
-            logging.info("Порівнюю дані з прайс-листом постачальника 1...")
+            # --- 6. Читаємо прайс постачальника (DictReader) ---
             with open(supliers_csv_path, mode='r', encoding='utf-8') as supliers_file:
-                supliers_reader = csv.reader(supliers_file, delimiter=delimiter)
-                next(supliers_reader, None)  # пропускаємо заголовок
+                # DictReader автоматично візьме перший рядок прайсу як ключі словника
+                supliers_reader = csv.DictReader(supliers_file, delimiter=delimiter)
                 
-                # --- 9. Ініціалізація лічильника ---
                 new_products_count = 0
 
-                # --- 10. Головний цикл: перевірка кожного товару ---
                 for row in supliers_reader:
-                    if not row:
-                        continue
+                    # Отримуємо артикул по назві колонки
+                    sku = row.get("Код_товара", "").strip().lower()
                     
-                    sku = row[0].strip().lower()
-                    
-                    # --- 11. Перевіряємо, чи товар новий (відсутній у базі) ---
                     if sku and sku not in existing_skus:
                         
-                        # --- 12. Формуємо новий рядок за структурою SL_new.csv ---
-                        new_row = [''] * num_new_columns
+                        # Створюємо пустий словник для нового рядка, заповнюємо порожніми значеннями
+                        new_row = {key: '' for key in fieldnames}
                         
-                        # Додаємо префікс до SKU
-                        sku_with_prefix = sku_prefix + row[0]
-                        new_row[0] = sku_with_prefix
+                        # --- 7. ПРЯМЕ МАПУВАННЯ (Назва -> Назва) ---
+                        
+                        # Спеціальне поле search (префікс + код)
+                        new_row["search"] = sku_prefix + row.get("Код_товара", "")
+                        
+                        # Основні поля (беруться прямо з row по ключу)
+                        new_row["shtrih_cod"] = row.get("Штрих_код", "")
+                        new_row["Код_товара"] = row.get("Код_товара", "")
+                        new_row["Название_позиции"] = row.get("Название_позиции", "")
+                        new_row["Описание"] = row.get("Описание", "")
+                        new_row["Цена"] = row.get("Цена", "")
+                        new_row["Наличие"] = row.get("Наличие", "")
+                        new_row["Производитель"] = row.get("Производитель", "")
+                        new_row["Страна_производитель"] = row.get("Страна_производитель", "")
+                        new_row["Категория"] = row.get("Категория", "")
+                        new_row["Доп. Категория 1"] = row.get("Доп. Категория 1", "")
+                        new_row["Доп. Категория 2"] = row.get("Доп. Категория 2", "")
 
-                        # --- 13. Мапування колонок з прайсу у новий CSV ---
-                        column_mapping = [
-                            (18, 2),  # s(18) -> с(2)
-                            (0, 5),   # a(0) -> f(5)
-                            (1, 6),   # b(1) -> g(6)
-                            (2, 7),   # c(2) -> h(7)
-                            (3, 8),   # d(3) -> i(8)
-                            (6, 9),   # g(6) -> j(9)
-                            (7, 10),  # h(7) -> k(10)
-                            (8, 11),  # i(8) -> l(11)
-                            (9, 12),  # j(9) -> m(12)
-                            (10, 13), # k(10) -> n(13)
-                            (11, 14), # l(11) -> o(14)
-                        ]
-                        for source_index, dest_index in column_mapping:
-                            if len(row) > source_index:
-                                new_row[dest_index] = row[source_index]
-                                
-                        # --- 14. Додаємо у файл нових товарів ---
-                        new_products_count += 1
+                        # --- 8. Запис рядка ---
                         writer.writerow(new_row)
+                        new_products_count += 1
 
         # --- 17. Підсумкове логування ---
         logging.info(f"✅ Знайдено {new_products_count} нових товарів.")
@@ -234,6 +242,7 @@ def find_new_products():
     except Exception as e:
         logging.info(f"❌ Виникла непередбачена помилка: {e}")
 
+# ОСНОВНА ФУНКЦІЯ 3: Знаходження урл товару
 def find_product_url():
     """
     Зчитує файл з новими товарами, переходить за URL-адресою,
@@ -247,8 +256,11 @@ def find_product_url():
     
     # --- 2. Завантаження налаштувань та формування шляхів/тимчасового файлу ---
     settings = load_oc_settings()
-    supliers_new_path = settings['paths']['csv_path_supliers_1_new']  # вхідний CSV (1.csv)
-    site_url = settings['suppliers']['1']['site']                     # базовий URL сайту (щоб додавати відносні посилання)
+    if not settings:
+        logging.error("❌ Не вдалося завантажити налаштування. Обробка прайс-листа перервана.")
+        return
+    supliers_new_path = settings['paths']['csv_path_new_product']     # вхідний CSV (1.csv)
+    site_url = settings['suppliers'][1]['site']                       # базовий URL сайту (щоб додавати відносні посилання)
     temp_file_path = supliers_new_path + '.temp'                      # тимчасовий файл під час запису
 
     # --- Лічильники і статистика ---
@@ -262,23 +274,36 @@ def find_product_url():
     try:
         # --- 3. Відкриваємо вхідний файл для читання ---
         with open(supliers_new_path, mode='r', encoding='utf-8') as input_file:
-            reader = csv.reader(input_file)
-            headers = next(reader)  # читаємо і зберігаємо заголовки (щоб переписати в тимчасовий файл)
+            reader = csv.DictReader(input_file)
+            # ВАЖЛИВО: Отримуємо заголовки одразу
+            fieldnames = reader.fieldnames
+            
+            # --- ПЕРЕВІРКА НА ПОМИЛКУ: Якщо заголовки пусті ---
+            if not fieldnames:
+                logging.error("❌ Помилка: Не вдалося прочитати заголовки стовпців. Перевірте, чи файл не пустий і чи коректне кодування.")
+                return
+            # Перевірка наявності критичних колонок
+            required_columns = ['search', 'sku', 'url_lutsk']
+            for col in required_columns:
+                if col not in fieldnames:
+                    logging.error(f"❌ У файлі відсутня обов'язкова колонка: {col}")
+                    return
 
-            # --- 4. Відкриваємо тимчасовий файл для поступового запису результатів ---
+            # --- 4. Відкриваємо тимчасовий файл для запису (DictWriter) ---
             with open(temp_file_path, mode='w', encoding='utf-8', newline='') as output_file:
-                writer = csv.writer(output_file)
-                writer.writerow(headers) # записуємо заголовки у тимчасовий файл
-
-                # --- 5. Ітерація по рядках вхідного файлу ---
+                writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+                writer.writeheader() # Автоматично записує рядок заголовків
+                
+                # --- 5. Ітерація по рядках ---
                 for idx, row in enumerate(reader):
                     total_rows += 1
-                    # 5.1. Витягуємо ключові поля із рядка
-                    search_url = row[0].strip()    # у вихідному файлі у колонці A може бути "посилання для пошуку"
-                    file_sku = row[5].strip()      # артикул (SKU) з колонки, яка відповідає індексу 5
+                    
+                    # 5.1. Витягуємо дані по назвах колонок
+                    search_url = row.get('search', '').strip()
+                    
+                    file_sku = row.get('Код_товара', '').strip()
 
-                    # --- 6. Перевірка валідності URL для пошуку ---
-                    # Якщо URL пустий або вже позначений як помилка запиту, пропускаємо рядок
+                    # --- 6. Перевірка валідності URL ---
                     if not search_url or search_url.startswith('Помилка запиту'):
                         writer.writerow(row)
                         continue
@@ -323,9 +348,9 @@ def find_product_url():
                                             found_type = 'simple'
                                             break
 
-                        # --- 10. Запис результату у колонку B (індекс 1) або логування якщо не знайдено ---
+                        # --- 10. Запис результату в колонку 'url_lutsk' або логування якщо не знайдено ---
                         if found_url:
-                            row[1] = found_url
+                            row['url_lutsk'] = found_url
                             if found_type == 'variant':
                                 found_variant_count += 1
                                 found_variant_rows.append(idx + 2)  # +2, бо рядки CSV рахуються з 1 + заголовок
@@ -339,9 +364,10 @@ def find_product_url():
                         writer.writerow(row)
 
                     except requests.RequestException as e:
-                        # --- 11. Обробка помилок HTTP-запиту: логування та маркування рядка ---
-                        logging.error(f"Рядок {idx + 2}: Помилка при запиті до урл: {e}")
-                        row[0] = f'Помилка запиту: {e}'  # позначаємо поле пошуку як помилкове
+                        # --- 11. Обробка помилок запиту ---
+                        logging.error(f"Рядок {idx + 2}: Помилка при запиті: {e}")
+                        # Записуємо помилку в колонку 'search', як було раніше
+                        row['search'] = f'Помилка запиту: {e}'
                         writer.writerow(row)
                     
                     # --- 12. Додаткова пауза між запитами (рандомізована) для уникнення бана/DDOS ---
@@ -372,96 +398,80 @@ def find_product_url():
             os.remove(temp_file_path)
         logging.error(f"Виникла непередбачена помилка: {e}")
 
+# ОСНОВНА ФУНКЦІЯ 4: Парсинг атрибутів
 def parse_product_attributes():
-    """
-    Парсить сторінки товарів, застосовує заміну з attribute.csv (блочна структура)
-    і додає нові невідомі значення одразу перед наступним блоком-заголовком.
+    oc_log_message()
+    logging.info("▶ ФУНКЦІЯ: Парсинг (Mapping + Auto-suffix |ua + Next Col RU)")
 
-    """
-
-    # --- 0. Лог старту ---
-    oc_log_message("▶ ФУНКЦІЯ: Парсинг атрибутів товарів (без штрих-кодів)")
-    logging.info("Починаю парсинг сторінок товарів для вилучення атрибутів")
-
-    # --- 1. Завантаження налаштувань ---
     settings = load_oc_settings()
-    try:
-        supliers_new_path = settings["paths"]["csv_path_supliers_1_new"]
-        product_data_map = settings["suppliers"]["1"]["product_data_columns"]
-        other_attrs_index = settings["suppliers"]["1"]["other_attributes_column"]
-    except (TypeError, KeyError) as e:
-        logging.error(f"Помилка доступу до налаштувань settings.json: {e}")
-        return
+    if not settings: return
+    
+    supliers_new_path = settings["paths"]["csv_path_new_product"]
 
-    # --- 2. Мапа оброблюваних атрибутів (без штрих-коду) ---
-    processing_map = {
-        attr_name: col_index
-        for attr_name, col_index in product_data_map.items()
-        if attr_name != "Штрих-код"
+    # =========================================================================
+    # 🔧 СЛОВНИК ПЕРЕЙМЕНУВАННЯ АТРИБУТІВ
+    # Тут ми вказуємо: "Як названо на сайті" : "Як називається колонка у файлі"
+    # =========================================================================
+    ATTRIBUTE_NAME_MAPPING = {
+        "Країна": "Зроблено в|ua",
+        "Марка/Лінія": "Бренд|ua",
+        # Додавайте сюди нові, якщо будуть розбіжності
+        # "Матеріал": "Склад тканини|ua", 
     }
 
-    # --- 3. Завантаження attribute.csv ---
+    # Завантаження мапи значень (attribute.csv)
     replacements_map, raw_data = load_attributes_csv()
     changes_made = False
-    max_raw_row_len = len(raw_data[0]) if raw_data and raw_data[0] else 10
+    max_raw_row_len = len(raw_data[0]) if raw_data and raw_data[0] else 12
 
-    # --- 4. Підготовка точок вставки для нових атрибутів ---
-    insertion_points = {}
-    current_col_index = None
+    # Точки вставки
+    insertion_points = {} 
+    current_block_name = None
+    for i, row_raw in enumerate(raw_data[1:], start=1):
+        first_col = row_raw[0].strip()
+        if first_col: 
+            current_block_name = first_col
+            insertion_points[current_block_name] = i + 1
+        elif current_block_name:
+            insertion_points[current_block_name] = i + 1
 
-    for i, row in enumerate(raw_data[1:], start=1):
-        if row and row[0].strip().isdigit():
-            col_index = int(row[0].strip())
-            if current_col_index is not None and current_col_index not in insertion_points:
-                insertion_points[current_col_index] = i
-            current_col_index = col_index
-            insertion_points[col_index] = i + 1
-        elif current_col_index is not None:
-            insertion_points[current_col_index] = i + 1
-
-    logging.debug(f"Точки вставки attribute.csv: {insertion_points}")
-
-    # --- 5. Лічильник нових атрибутів ---
-    new_attributes_counter = {}  # {col_index: count}
-
-    # --- 6. Обробка CSV постачальника ---
+    new_attributes_counter = {} 
     temp_file_path = supliers_new_path + ".temp"
 
     try:
         with open(supliers_new_path, mode="r", encoding="utf-8") as input_file, \
              open(temp_file_path, mode="w", encoding="utf-8", newline="") as output_file:
 
-            reader = csv.reader(input_file)
-            writer = csv.writer(output_file)
+            reader = csv.DictReader(input_file)
+            fieldnames = reader.fieldnames 
+            
+            if not fieldnames:
+                logging.error("❌ Файл порожній!")
+                return
+            
+            logging.info(f"Знайдено колонок у файлі: {len(fieldnames)}")
 
-            headers = next(reader)
-            writer.writerow(headers)
+            writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+            writer.writeheader()
 
-            for idx, row in enumerate(reader, start=2):  # start=2 → з урахуванням заголовка
-                product_url = row[1].strip() if len(row) > 1 else ""
+            processed_count = 0
 
-                # --- Розширення рядка при необхідності ---
-                max_index = max(
-                    max(product_data_map.values(), default=0),
-                    other_attrs_index
-                )
-                if len(row) <= max_index:
-                    row.extend([""] * (max_index + 1 - len(row)))
+            for row in reader:
+                processed_count += 1
+                row_values = list(row.values())
+                product_url = row_values[1].strip() if len(row_values) > 1 else ""
 
-                # --- Пропуск некоректних URL ---
-                if not product_url or product_url.startswith("Помилка запиту"):
+                if not product_url or product_url.startswith("Помилка"):
                     writer.writerow(row)
                     continue
 
                 try:
-                    # --- 6.1 Запит сторінки ---
                     response = requests.get(product_url, timeout=10)
                     response.raise_for_status()
                     soup = BeautifulSoup(response.text, "html.parser")
 
-                    characteristics_div = soup.find("div", id="w0-tab0")
                     parsed_attributes = {}
-
+                    characteristics_div = soup.find("div", id="w0-tab0")
                     if characteristics_div and characteristics_div.find("table"):
                         for tr in characteristics_div.find("table").find_all("tr"):
                             cells = tr.find_all("td")
@@ -470,188 +480,230 @@ def parse_product_attributes():
                                 value = cells[1].get_text(strip=True)
                                 parsed_attributes[key] = value
 
-                    other_attributes = []
+                    other_attributes_list = []
 
-                    # --- 6.2 Обробка атрибутів ---
-                    for attr_name, attr_value in parsed_attributes.items():
+                    # --- Обробка атрибутів ---
+                    for attr_name_site, attr_value in parsed_attributes.items():
+                        if attr_name_site == "Штрих-код": continue
 
-                        # ❗ Повністю ігноруємо штрих-код
-                        if attr_name == "Штрих-код":
-                            continue
+                        # === ЛОГІКА ВИЗНАЧЕННЯ КОЛОНКИ ===
+                        final_col_name = None
+                        
+                        # 1. Пріоритет: Перевіряємо ручний мапинг (Словник зверху)
+                        if attr_name_site in ATTRIBUTE_NAME_MAPPING:
+                            mapped_name = ATTRIBUTE_NAME_MAPPING[attr_name_site]
+                            if mapped_name in row:
+                                final_col_name = mapped_name
+                        
+                        # 2. Пріоритет: Автоматичний суфікс |ua
+                        if not final_col_name:
+                            target_col_ua = f"{attr_name_site}|ua"
+                            if target_col_ua in row:
+                                final_col_name = target_col_ua
+                            elif attr_name_site in row: # Прямий збіг (без суфіксів)
+                                final_col_name = attr_name_site
+                        
+                        # === ДІЇ З ЗНАЙДЕНОЮ КОЛОНКОЮ ===
+                        if final_col_name:
+                            original_value_lower = attr_value.strip().lower()
+                            rules_for_this_attr = replacements_map.get(final_col_name, {})
+                            
+                            found_data = rules_for_this_attr.get(original_value_lower)
 
-                        target_col_index = processing_map.get(attr_name)
-                        original_value_lower = attr_value.strip().lower()
+                            if found_data:
+                                # Розпаковка значень (Tuple check)
+                                if isinstance(found_data, tuple) and len(found_data) >= 2:
+                                    ua_new, ru_new = found_data
+                                else:
+                                    ua_new = str(found_data)
+                                    ru_new = "" 
 
-                        if target_col_index is not None:
-                            replacement_rules = replacements_map.get(target_col_index, {})
-                            new_value = replacement_rules.get(original_value_lower)
-
-                            if new_value:
-                                row[target_col_index] = new_value
+                                # Пишемо UA
+                                row[final_col_name] = ua_new
+                                
+                                # Пишемо RU (наступна колонка)
+                                if ru_new:
+                                    try:
+                                        current_idx = fieldnames.index(final_col_name)
+                                        if current_idx + 1 < len(fieldnames):
+                                            next_col_name = fieldnames[current_idx + 1]
+                                            row[next_col_name] = ru_new
+                                    except ValueError: pass 
                             else:
-                                if original_value_lower not in replacement_rules:
-                                    insert_index = insertion_points.get(target_col_index)
-
-                                    if insert_index is None:
-                                        logging.error(
-                                            f"Атрибут '{attr_value}' (I={target_col_index}) "
-                                            f"не додано: відсутня точка вставки"
-                                        )
-                                        row[target_col_index] = attr_value
-                                        continue
-
-                                    new_raw_row = [""] * max_raw_row_len
-                                    new_raw_row[2] = original_value_lower
-                                    raw_data.insert(insert_index, new_raw_row)
-
-                                    replacements_map.setdefault(
-                                        target_col_index, {}
-                                    )[original_value_lower] = ""
-
-                                    changes_made = True
-
-                                    # Зсув точок вставки
-                                    for col, point in insertion_points.items():
-                                        if point >= insert_index:
-                                            insertion_points[col] += 1
-
-                                    new_attributes_counter[target_col_index] = (
-                                        new_attributes_counter.get(target_col_index, 0) + 1
-                                    )
-
-                                row[target_col_index] = attr_value
+                                # Нове значення -> пишемо оригінал
+                                row[final_col_name] = attr_value
+                                
+                                # Додаємо в attribute.csv
+                                if original_value_lower not in rules_for_this_attr:
+                                    insert_index = insertion_points.get(final_col_name)
+                                    if insert_index is not None:
+                                        new_raw_row = [""] * max_raw_row_len
+                                        new_raw_row[2] = original_value_lower
+                                        raw_data.insert(insert_index, new_raw_row)
+                                        
+                                        # Кешуємо як кортеж
+                                        replacements_map.setdefault(final_col_name, {})[original_value_lower] = (attr_value, "") 
+                                        
+                                        changes_made = True
+                                        new_attributes_counter[final_col_name] = new_attributes_counter.get(final_col_name, 0) + 1
+                                        
+                                        for k, v in insertion_points.items():
+                                            if v >= insert_index: insertion_points[k] += 1
                         else:
-                            other_attributes.append(f"{attr_name}:{attr_value}")
+                            # Колонки немає ні в мапингу, ні напряму -> "Нові атрибути"
+                            other_attributes_list.append(f"{attr_name_site}:{attr_value}")
 
-                    if other_attributes:
-                        row[other_attrs_index] = ", ".join(other_attributes)
+                    # --- Запис "Нові атрибути" ---
+                    if other_attributes_list:
+                        new_content = ", ".join(other_attributes_list)
+                        if "Нові атрибути" in row:
+                            current = row.get("Нові атрибути", "")
+                            row["Нові атрибути"] = (current + ", " + new_content) if current else new_content
 
-                    writer.writerow(row)
-
-                except requests.RequestException as req_err:
-                    logging.error(f"Помилка запиту URL {product_url}: {req_err}")
                     writer.writerow(row)
 
                 except Exception as e:
-                    logging.error(f"Помилка парсингу URL {product_url}: {e}")
+                    logging.error(f"Помилка URL {product_url}: {e}")
                     writer.writerow(row)
 
                 time.sleep(random.uniform(1, 3))
 
-        # --- 7. Заміна файлу ---
         os.replace(temp_file_path, supliers_new_path)
-        logging.info("Парсинг атрибутів завершено. CSV постачальника оновлено.")
+        logging.info(f"Парсинг завершено. Товарів: {processed_count}")
 
-        # --- 8. Збереження attribute.csv ---
         if changes_made:
             save_attributes_csv(raw_data)
+            logging.info("===== ЗВІТ ПРО НОВІ ЗНАЧЕННЯ =====")
+            total_new = 0
+            for attr_block, count in sorted(new_attributes_counter.items()):
+                logging.info(f"• {attr_block}: +{count}")
+                total_new += count
+            logging.info(f"РАЗОМ додано: {total_new}")
+            logging.info("==================================")
         else:
-            logging.info("attribute.csv не змінювався.")
-
-        # --- 9. Підсумкове логування ---
-        if new_attributes_counter:
-            logging.info("Додані нові атрибути:")
-            for col_index, count in sorted(new_attributes_counter.items()):
-                logging.info(f"Колонка {col_index}: +{count}")
-        else:
-            logging.info("Нових атрибутів не додано.")
-
+            logging.info("Нових значень атрибутів не виявлено.")
+        
     except Exception as e:
-        logging.error(f"Критична помилка виконання: {e}")
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+        logging.error(f"Критична помилка: {e}")
+        if os.path.exists(temp_file_path): os.remove(temp_file_path)
 
+# ОСНОВНА ФУНКЦІЯ 5: Стандартизація атрибутів
 def apply_final_standardization():
     """
-    Застосовує фінальні правила стандартизації з attribute.csv до файлу 1.csv.
-    Замінює атрибути на значення з колонки 'attr_site_name', якщо воно існує.
-    Проігноровані атрибути (з порожнім 'attr_site_name') очищаються.
-    Атрибути, для яких не знайдено правил, залишаються без змін.
-    Логування включає інформацію про кількість замін та очищень.
+    Проходить по вже сформованому файлу і стандартизує значення згідно з attribute.csv.
+    1. Виправляє регістр (наприклад "водна" -> "Водна").
+    2. Оновлює російський переклад в сусідній колонці.
+    3. Працює на основі назв колонок.
     """
     oc_log_message()
-    logging.info("ФУНКЦІЯ 4. Починаю фінальну стандартизацію атрибутів у 1.csv...")
+    logging.info("▶ ФУНКЦІЯ 5. Фінальна стандартизація (UA + RU update)...")
 
     # --- 1. Завантаження налаштувань ---
     settings = load_oc_settings()
-    try:
-        csv_path = settings['paths']['csv_path_supliers_1_new']
-        product_map = settings['suppliers']['1']['product_data_columns']
-    except TypeError as e:
-        logging.error(f"Помилка доступу до налаштувань: {e}")
+    if not settings: return
+
+    csv_path = settings['paths']['csv_path_new_product']
+    
+    # --- 2. Завантаження правил заміни ---
+    # Отримуємо словник: {'Основа|ua': {'водна': ('Водна', 'Водная')}}
+    replacements_map, _ = load_attributes_csv()
+    
+    if not replacements_map:
+        logging.warning("⚠️ attribute.csv порожній або не завантажився. Стандартизація пропущена.")
         return
 
-    # --- 2. Підготовка мапи для обробки (без Штрих-коду) ---
-    processing_map = {k: v for k, v in product_map.items() if k != "Штрих-код"}
+    # --- 3. Підготовка статистики ---
+    replacement_counter = {}  # {col_name: count}
 
-    # --- 3. Завантаження правил заміни ---
-    replacements_map, _ = load_attributes_csv()
-
-    # --- 4. Підготовка статистики замін ---
-    replacement_counter = {}  # {col_index: count}
-    cleared_counter = {}      # {col_index: count}
-
-    # --- 5. Обробка CSV ---
+    # --- 4. Обробка CSV ---
     temp_file_path = csv_path + '.final_temp'
+    
     try:
         with open(csv_path, 'r', encoding='utf-8') as infile, \
              open(temp_file_path, 'w', encoding='utf-8', newline='') as outfile:
 
-            reader = csv.reader(infile)
-            writer = csv.writer(outfile)
-            headers = next(reader)
-            writer.writerow(headers)
+            reader = csv.DictReader(infile)
+            fieldnames = reader.fieldnames
+            
+            if not fieldnames:
+                logging.error("❌ Файл порожній!")
+                return
 
-            # Словник для логування назв колонок
-            column_names = {index: name for name, index in processing_map.items()}
+            writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+            writer.writeheader()
 
-            for idx, row in enumerate(reader):
-                max_index = max(product_map.values(), default=0)
-                if len(row) <= max_index:
-                    row.extend([''] * (max_index + 1 - len(row)))
+            processed_rows = 0
 
-                for col_index, rules in replacements_map.items():
-                    if col_index >= len(row):
-                        continue
+            for row in reader:
+                processed_rows += 1
+                row_updated = False
 
-                    current_value = row[col_index].strip()
-                    if not current_value:
-                        continue
+                # Проходимо по всіх колонках, для яких у нас є правила в attribute.csv
+                # col_name - це, наприклад, "Основа|ua" або "Колір|ua"
+                for col_name, rules in replacements_map.items():
+                    
+                    # Перевіряємо, чи існує така колонка у файлі
+                    if col_name in row:
+                        current_value = row[col_name].strip()
+                        
+                        if not current_value:
+                            continue
 
-                    current_lower = current_value.lower()
-                    col_name = column_names.get(col_index, f"I={col_index}")
-                    new_value = rules.get(current_lower)
+                        current_value_lower = current_value.lower()
+                        
+                        # Чи є правило для цього значення?
+                        found_pair = rules.get(current_value_lower)
 
-                    if new_value is not None:
-                        if new_value:
-                            if new_value != current_value:
-                                row[col_index] = new_value
-                                replacement_counter[col_index] = replacement_counter.get(col_index, 0) + 1
-                                logging.info(f"Рядок {idx + 2}: ЗАМІНА ({col_name}): '{current_value}' -> '{new_value}'")
-                        else:
-                            row[col_index] = ""
-                            cleared_counter[col_index] = cleared_counter.get(col_index, 0) + 1
-                            logging.warning(f"Рядок {idx + 2}: ІГНОРУВАННЯ/ОЧИЩЕННЯ ({col_name}): '{current_value}' очищено")
+                        if found_pair:
+                            # found_pair має вигляд ('Водна', 'Водная')
+                            # Захист від старого формату даних
+                            if isinstance(found_pair, tuple) and len(found_pair) >= 2:
+                                ua_std, ru_std = found_pair
+                            else:
+                                ua_std = str(found_pair)
+                                ru_std = ""
+
+                            # 1. Оновлюємо UA значення (якщо відрізняється)
+                            if row[col_name] != ua_std:
+                                row[col_name] = ua_std
+                                row_updated = True
+                                # Логуємо зміну
+                                replacement_counter[col_name] = replacement_counter.get(col_name, 0) + 1
+
+                            # 2. Оновлюємо RU значення (сусідня колонка)
+                            if ru_std:
+                                try:
+                                    # Знаходимо індекс UA колонки
+                                    ua_idx = fieldnames.index(col_name)
+                                    # Беремо наступну колонку (+1)
+                                    if ua_idx + 1 < len(fieldnames):
+                                        ru_col_name = fieldnames[ua_idx + 1]
+                                        
+                                        # Оновлюємо RU, якщо воно відрізняється або пусте
+                                        if row[ru_col_name] != ru_std:
+                                            row[ru_col_name] = ru_std
+                                            row_updated = True
+                                except ValueError:
+                                    pass # Якщо щось пішло не так з індексами
 
                 writer.writerow(row)
 
+        # --- 5. Заміна файлу ---
         os.replace(temp_file_path, csv_path)
-        logging.info("Фінальна стандартизація завершена. csv оновлено.")
+        logging.info("Фінальна стандартизація завершена. Файл оновлено.")
 
         # --- 6. Підсумкове логування ---
         if replacement_counter:
+            logging.info("===== ЗВІТ ПРО СТАНДАРТИЗАЦІЮ =====")
             for col, count in sorted(replacement_counter.items()):
-                logging.info(f"Атрибут {col}: виконано {count} замін")
-        if cleared_counter:
-            for col, count in sorted(cleared_counter.items()):
-                logging.info(f"Атрибут {col}: очищено {count} значень")
+                logging.info(f"• {col}: стандартизовано {count} рядків")
+            logging.info(f"РАЗОМ змін: {sum(replacement_counter.values())}")
+            logging.info("===================================")
+        else:
+            logging.info("Усі значення вже відповідають стандартам.")
 
-    except FileNotFoundError as e:
-        logging.error(f"Файл не знайдено: {e}")
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
     except Exception as e:
-        logging.error(f"Непередбачена помилка при стандартизації: {e}")
+        logging.error(f"Критична помилка при стандартизації: {e}")
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 

@@ -1,4 +1,4 @@
-import csv, pymysql, html, os, re, logging, requests, shutil
+import csv, pymysql, html, os, re, logging, requests, shutil, io
 import pandas as pd
 from scr.oc_base_function import oc_setup_new_log_file, oc_log_message, oc_connect_db, load_oc_settings
 
@@ -127,6 +127,7 @@ def oc_export_products():
         logging.warning(empty_msg)
         print(empty_msg)
 
+# ГОЛОВНА ФУНКЦІЯ 2: Завантаження прайсу постачальника за його ID
 def download_supplier_price_list(supplier_id):
     """
     Скачує прайс-лист від постачальника за його ID.
@@ -141,15 +142,15 @@ def download_supplier_price_list(supplier_id):
         return
     
     # 2. Отримання інформації про постачальника
-    supplier_info = settings.get("suppliers", {}).get(str(supplier_id))
+    suppliers = settings.get("suppliers", {})
+    supplier_info = suppliers.get(int(supplier_id))
     if not supplier_info:
         logging.error(f"❌ Помилка: Інформацію про постачальника з ID '{supplier_id}' не знайдено.")
         return
 
     # 3. Визначення шляхів
-    base_dir = os.path.join(os.path.dirname(__file__), "..")
     url = supplier_info.get("download_url")
-    csv_path = os.path.join(base_dir, supplier_info.get("csv_path"))
+    csv_path = supplier_info.get("csv_path")
 
     if not url or not csv_path:
         logging.error(f"❌ Неповні дані про постачальника '{supplier_id}'. Відсутній URL або шлях.")
@@ -180,6 +181,7 @@ def download_supplier_price_list(supplier_id):
     except Exception as e:
         logging.error(f"❌ Виникла невідома помилка під час завантаження: {e}", exc_info=True)
 
+# ГОЛОВНА ФУНКЦІЯ 3: Обробка прайсу постачальників
 def process_supplier_1_price_list():
     """
     Обробляє та очищає прайс-лист від постачальника 1.
@@ -194,112 +196,188 @@ def process_supplier_1_price_list():
         return
 
     supplier_id = "1"
-    supplier_info = settings.get("suppliers", {}).get(supplier_id)
+    supplier_info = settings.get("suppliers", {}).get(int(supplier_id))
     if not supplier_info:
         logging.error(f"❌ Помилка: Інформацію про постачальника з ID '{supplier_id}' не знайдено.")
         return
 
     # 2. Визначення шляхів та параметрів
-    base_dir = os.path.join(os.path.dirname(__file__), "..")
-    csv_path = os.path.join(base_dir, supplier_info.get("csv_path"))
-    delimiter = supplier_info.get("delimiter", ",")
+    csv_path = supplier_info.get("csv_path")
+    csv_mod_path = supplier_info.get("csv_mod_path")
+    delimiter = supplier_info.get("delimiter")
+    # Отримуємо очікувані заголовки як рядок
+    expected_headers_str = supplier_info.get("header_price")
+    # ЗАВАНТАЖЕННЯ ЧОРНОГО СПИСКУ
+    # Якщо списку немає в налаштуваннях, повернеться порожній список []
+    blacklisted_brands = settings.get("blacklisted_brands", [])
+    # Переводимо всі слова в нижній регістр про всяк випадок
+    blacklisted_brands = [word.lower() for word in blacklisted_brands]
 
     if not os.path.exists(csv_path):
         logging.error(f"❌ Файл прайс-листа для постачальника {supplier_id} не знайдено")
         return
 
-    logging.info(f"⚙️ Запускаю обробку прайс-листа для постачальника {supplier_id}.")
+    logging.info(f"⚙️ Запускаю обробку прайс-листа для постачальника {supplier_id}. \n Чорний список брендів: {blacklisted_brands}")
 
-    # 3. Фільтрація та обробка даних
-    words_to_filter_from_name = ["jos", "a-toys"]
-    words_to_filter_from_brand = ["toyfa"]
-
-    temp_file_path = f"{csv_path}.temp"
     processed_rows = []
     skipped_rows = 0
     total_rows = 0
+    skipped_by_blacklist = 0
     skipped_by_date_in_name = 0
     skipped_by_empty_barcode = 0
+    fieldnames = [] # Тут збережемо заголовки для запису
 
     try:
         with open(csv_path, "r", newline="", encoding="utf-8") as infile:
-            reader = csv.reader(infile, delimiter=delimiter)
-            headers = next(reader)
-            date_pattern = re.compile(r'\b(0[1-9]|1[0-2])\.\d{4}\b')
-            processed_rows.append(headers)
-            
+            reader = csv.DictReader(infile, delimiter=delimiter)
+
+            actual_headers = reader.fieldnames
+            fieldnames = actual_headers # Запам'ятовуємо для запису файлу
+            # --- ПЕРЕВІРКА ЗАГОЛОВКІВ ---
+            if expected_headers_str:
+                expected_headers_list = next(csv.reader(io.StringIO(expected_headers_str), delimiter=delimiter))
+
+                if actual_headers != expected_headers_list:
+                    logging.error("❌ КРИТИЧНА ПОМИЛКА: Структура файлу змінилася!")
+                    logging.error(f"   Очікували: {expected_headers_list}")
+                    logging.error(f"   Отримали:  {actual_headers}")
+                    logging.error("⏹️ Обробку зупинено.")
+                    return
+                else:
+                    logging.info("✅ Структура заголовків вірна.")
+            else:
+                logging.warning("⚠️ Немає 'header_price' в налаштуваннях, пропускаю перевірку.")
+           
+
             row_number = 1
             for row in reader:
                 row_number += 1
                 total_rows += 1
 
-                # Перевірка колонки 4 (ціна) на наявність літер
-                if len(row) > 3:
-                    price_value = row[3]
-                    if re.search(r'[a-zA-Z]', price_value):
-                        logging.warning(f"🚫 Видалено рядок {row_number} через наявність літер у колонці 4 (ціна): '{price_value}'.")
-                        skipped_rows += 1
+                # 1. Фільтр ціни (літери)
+                price_val = row.get("Цена", "")
+                if re.search(r'[a-zA-Zа-яА-ЯіІїЇєЄґҐёЁ]', price_val):
+                    logging.warning(f"🚫 Рядок {row_number}: літери в ціні '{price_val}'.")
+                    skipped_rows += 1
+                    continue
+
+                # 2. УНІВЕРСАЛЬНИЙ ФІЛЬТР ПО БРЕНДАХ/НАЗВАХ (Новий блок)
+                if blacklisted_brands:
+                    # Отримуємо значення з колонок і переводимо в нижній регістр
+                    brand_val = row.get("Производитель", "").lower()
+                    desc_val = row.get("Описание", "").lower()
+                    name_val = row.get("Название_позиции", "").lower()
+                    
+                    found_bad_word = False
+                    
+                    # Перевіряємо кожне заборонене слово
+                    for bad_word in blacklisted_brands:
+                        # Шукаємо слово і в Бренді, і в Описі
+                        if (bad_word in brand_val) or (bad_word in desc_val) or (bad_word in name_val):
+                            logging.warning(f"🚫 Рядок {row_number}: Видалено через фільтр '{bad_word}'. (Назва: {row.get('Название_позиции')}, Бренд: {row.get('Производитель')}, Опис: {row.get('Описание')[:20]}...)")
+                            skipped_rows += 1
+                            skipped_by_blacklist += 1
+                            found_bad_word = True
+                            break # Якщо знайшли хоч одне слово, далі не перевіряємо, видаляємо
+                    
+                    if found_bad_word:
                         continue
 
-                # Фільтрація за колонкою 3 (назва)
-                if len(row) > 2:
-                    product_name = row[2].lower()
-                    if any(word in product_name for word in words_to_filter_from_name):
-                        logging.warning(f"🚫 Видалено рядок {row_number} через заборонене слово в назві ('{row[2]}').")
-                        skipped_rows += 1
-                        continue
-                
-                # Фільтрація за колонкою 8 (бренд)
-                if len(row) > 7:
-                    brand_name = row[7].lower()
-                    if any(word in brand_name for word in words_to_filter_from_brand):
-                        logging.warning(f"🚫 Видалено рядок {row_number} через заборонене слово в бренді ('{row[7]}').")
-                        skipped_rows += 1
-                        continue
 
-                # Перетворення колонки 4 (ціна) з float на int
-                if len(row) > 3 and row[3]:
+                # 3. Конвертація ціни
+                if price_val:
                     try:
-                        row[3] = str(int(float(row[3])))
-                    except (ValueError, IndexError):
-                        logging.warning(f"⚠️ Помилка перетворення ціни в рядку {row_number}. Значення: '{row[3]}'")
+                        row["Цена"] = str(int(float(price_val)))
+                    except (ValueError, TypeError):
+                         pass 
 
-                # Перевірка на дату у назві товару (колонка B)
-                if len(row) > 1:
-                    product_name_raw = row[1]
-                    if date_pattern.search(product_name_raw):
-                        logging.warning(
-                            f"🚫 Видалено рядок {row_number} через дату в назві товару ('{product_name_raw}')."
-                        )
-                        skipped_rows += 1
-                        skipped_by_date_in_name += 1
-                        continue
+                # 4. Дата в назві
+                date_pattern = re.compile(r'\b(0[1-9]|1[0-2])\.\d{4}\b')
+                name_for_date_val = row.get("Название_позиции", "")
+                if date_pattern.search(name_for_date_val):
+                    logging.warning(f"🚫 Рядок {row_number}: Видалено через фільтр 'Дата в назві'. Назва: {row.get('Название_позиции')}")
+                    skipped_rows += 1
+                    skipped_by_date_in_name += 1
+                    continue
 
-                # Перевірка штрихкоду (колонка S)
-                if len(row) <= 18 or not row[18].strip():
-                    logging.warning(
-                        f"🚫 Видалено рядок {row_number} через порожній штрихкод (колонка S)."
-                    )
+                # 5. Штрихкод
+                barcode_val = row.get("Штрих_код", "")
+                if not barcode_val or len(barcode_val.strip()) == 0:
+                    logging.warning(f"🚫 Рядок {row_number}: Видалено через фільтр 'Пустий штрихкод'")
                     skipped_rows += 1
                     skipped_by_empty_barcode += 1
                     continue
                 
-                # Заміна значення в колонці 7 (категорія)
-                if len(row) > 6 and row[6] == ">3":
-                    row[6] = "4"
+                # 6. Наявність
+                if row.get("Наличие") == ">3":
+                    row["Наличие"] = "4"
                 
-                processed_rows.append(row)
+                processed_rows.append(row)                
     
     except Exception as e:
         logging.error(f"❌ Виникла помилка під час обробки файлу: {e}", exc_info=True)
         return
 
-    # 4. Запис обробленого файлу
-    with open(temp_file_path, "w", newline="", encoding="utf-8") as outfile:
-        writer = csv.writer(outfile, delimiter=delimiter)
-        writer.writerows(processed_rows)
+    # --- 4. Запис у новий файл (ВИПРАВЛЕНО) ---
+    try:
+        output_dir = os.path.dirname(csv_mod_path)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
 
-    os.replace(temp_file_path, csv_path)
+        with open(csv_mod_path, "w", newline="", encoding="utf-8") as outfile:
+            # ТУТ ГОЛОВНА ЗМІНА: Використовуємо DictWriter
+            writer = csv.DictWriter(outfile, fieldnames=fieldnames, delimiter=delimiter)
+            
+            # Пишемо заголовки правильно
+            writer.writeheader()
+            
+            # Пишемо дані
+            writer.writerows(processed_rows)
+            
+        logging.info(f"💾 Файл успішно збережено: {csv_mod_path}")
+        
+    except Exception as e:
+        logging.error(f"❌ Помилка запису файлу {csv_mod_path}: {e}", exc_info=True)
+        return
+
+    # --- 5. ПЕРЕВІРКА ЗАПИСАНОГО ФАЙЛУ НА ДУБЛІКАТИ ---
+    logging.info(f"🔎 Перевіряю збережений файл на дублікати штрихкодів: {csv_mod_path}")
+    
+    try:
+        barcode_tracker = {}
+        duplicates_found = 0
+        
+        # Відкриваємо ЩОЙНО збережений файл для читання
+        with open(csv_mod_path, "r", newline="", encoding="utf-8") as checkfile:
+            # Використовуємо DictReader, щоб звертатися по назві колонки
+            check_reader = csv.DictReader(checkfile, delimiter=delimiter)
+            
+            # enumerate start=2, бо рядок 1 - це заголовки
+            for line_num, row in enumerate(check_reader, start=2):
+                barcode = row.get("Штрих_код", "").strip()
+                
+                if not barcode:
+                    continue
+                    
+                if barcode not in barcode_tracker:
+                    barcode_tracker[barcode] = []
+                
+                barcode_tracker[barcode].append(line_num)
+        
+        # Аналіз результатів
+        for barcode, rows_list in barcode_tracker.items():
+            if len(rows_list) > 1:
+                duplicates_found += 1
+                rows_str = ", ".join(map(str, rows_list))
+                logging.warning(f"⚠️ УВАГА: Однакові штрихкоди '{barcode}' у рядках (готового файлу): {rows_str}")
+
+        if duplicates_found == 0:
+            logging.info("✅ У збереженому файлі дублікатів штрихкодів немає.")
+        else:
+            logging.info(f"⚠️ Знайдено {duplicates_found} штрихкодів, що повторюються у збереженому файлі.")
+
+    except Exception as e:
+        logging.error(f"❌ Помилка при перевірці файлу: {e}", exc_info=True)
 
     # 5. Логування підсумків
     logging.info(f"🎉 Обробку прайс-листа для постачальника {supplier_id} завершено.")
@@ -310,6 +388,7 @@ def process_supplier_1_price_list():
     logging.info(f"📅 Видалено через дату в назві: {skipped_by_date_in_name}")
     logging.info(f"🏷️ Видалено через відсутній штрихкод: {skipped_by_empty_barcode}")
 
+# ДОРОБИТИ
 def process_supplier_2_price_list():
     """
     Обробляє та очищає прайс-лист від постачальника 2.
@@ -407,7 +486,7 @@ def process_supplier_2_price_list():
     logging.info(f"📝 Змінено категорій '>3' -> '4': {modifications_count} разів")
     logging.info(f"✅ Оброблені рядки: {len(processed_rows) - 1}")
     print("✅ Обробка прайс-листа завершена. Деталі в лог-файлі.")
-
+# ДОРОБИТИ
 def process_supplier_3_price_list():
     """
     Обробляє та конвертує прайс-лист від постачальника 3 (формат .xls),

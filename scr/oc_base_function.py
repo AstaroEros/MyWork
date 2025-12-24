@@ -158,23 +158,21 @@ def oc_log_message(message=None):
 # --- 5. ЗАВАНТАЖЕННЯ ФАЙЛУ attribute.csv ---
 def load_attributes_csv():
     """
-    Завантажує правила заміни атрибутів з attribute.csv (гібридна блочна структура).
-    Повертає:
-    1. replacements_map: Словник {col_index: {original_value: new_value}} для швидкого пошуку.
-    2. raw_data: Список сирих рядків для збереження структури файлу.
+    Завантажує атрибути. 
+    Повертає словник замін, де значення — це кортеж (UA_Standard, RU_Translation).
+    Остання колонка файлу вважається російським перекладом.
     """
     settings = load_oc_settings()
-    if not settings or "paths" not in settings or "attribute" not in settings["paths"]:
-        logging.error("❌ У settings.json не знайдено paths.attribute")
+    if not settings:
         return {}, []
 
     attribute_path = settings["paths"]["attribute"]
     replacements_map = {}
-    raw_data = []          
+    raw_data = []
     
-    # Стандартний заголовок
-    default_header = ["column_number", "attr_site_name", "atr_a", "atr_b", "atr_c", "atr_d", "atr_e", "atr_f", "atr_g", "atr_h", "atr_i"]
-    current_col_index = None # Відстежуємо поточний блок
+    # Оновлений заголовок (додано Russian в кінці)
+    default_header = ["column_name", "attr_site_name", "atr_a", "atr_b", "atr_c", "atr_d", "atr_e", "atr_f", "atr_g", "atr_h", "atr_i", "Russian"]
+    current_block_name = None
 
     try:
         with open(attribute_path, 'r', encoding='utf-8') as f:
@@ -188,40 +186,50 @@ def load_attributes_csv():
                 return {}, [default_header]
 
             for row in reader:
-                # Нормалізуємо довжину рядка
-                row = row[:max_row_len] + [''] * (max_row_len - len(row))
+                # Нормалізація довжини рядка
+                current_len = len(row)
+                if current_len < max_row_len:
+                    row = row + [''] * (max_row_len - current_len)
+                else:
+                    row = row[:max_row_len]
+                
                 raw_data.append(row)
                 
-                # 1. Якщо це рядок-заголовок (наприклад, "27",,,,,)
-                if row and row[0].strip().isdigit():
-                    try:
-                        current_col_index = int(row[0].strip())
-                        if current_col_index not in replacements_map:
-                            replacements_map[current_col_index] = {}
-                    except ValueError:
-                        current_col_index = None
-                        continue
+                first_cell = row[0].strip()
+
+                # 1. Початок блоку (назва атрибута, наприклад "Основа|ua")
+                if first_cell:
+                    current_block_name = first_cell
+                    if current_block_name not in replacements_map:
+                        replacements_map[current_block_name] = {}
                 
-                # 2. Якщо це рядок-правило (наприклад, ,,,чорний,,)
-                elif current_col_index is not None and len(row) >= 3:
+                # 2. Рядок зі значеннями
+                elif current_block_name is not None and len(row) >= 3:
                     
-                    # Стандартизоване значення знаходиться в колонці 1 (attr_site_name)
-                    new_value = row[1].strip() 
+                    # UA Standard - колонка 1
+                    ua_std = row[1].strip()
                     
-                    # Переглядаємо всі значення постачальників (починаючи з індексу 2)
-                    for original in row[2:]:
+                    # RU Translation - ОСТАННЯ колонка (-1)
+                    ru_std = row[-1].strip()
+
+                    # Якщо немає UA значення, рядок порожній або службовий -> пропускаємо логіку замін
+                    if not ua_std:
+                        continue
+
+                    # Синоніми — це все між UA (index 1) та RU (index -1)
+                    # Тобто slice [2:-1]
+                    synonyms = row[2:-1]
+
+                    for original in synonyms:
                         original = original.strip().lower()
                         if original:
-                            # Ключ - оригінал (lower), Значення - заміна (з attr_site_name)
-                            replacements_map[current_col_index][original] = new_value
+                            # Зберігаємо ПАРУ: (UA, RU)
+                            replacements_map[current_block_name][original] = (ua_std, ru_std)
 
         return replacements_map, raw_data
     
-    except FileNotFoundError:
-        logging.warning(f"Файл атрибутів 'attribute.csv' не знайдено. Буде створено новий.")
-        return {}, [default_header]
     except Exception as e:
-        logging.error(f"Виникла помилка при завантаженні attribute.csv: {e}")
+        logging.error(f"Помилка attribute.csv: {e}")
         return {}, [default_header]
 
 # --- 6. ЗБЕРЕЖЕННЯ ФАЙЛУ attribute.csv ---    

@@ -169,7 +169,7 @@ def main():
         print("📂 Імпорт категорій у OpenCart...")
         oc_import_categories_from_csv()
     elif args.standardize_final:
-        print("✅ Запускаю фінальну стандартизацію SL_new.csv...")
+        print("✅ Запускаю фінальну стандартизацію new_product.csv...")
         apply_final_standardization()
     elif args.fill_categories:
         print("🗂️ Запускаю заповнення категорій...")
