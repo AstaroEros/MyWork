@@ -4,7 +4,7 @@ from scr.oc_base_function import oc_import_categories_from_csv, check_csv_data
 from scr.oc_products import oc_export_products, download_supplier_price_list, \
                             process_supplier_1_price_list, process_supplier_2_price_list, process_supplier_3_price_list
 from scr.oc_suppliers_1 import find_new_products, find_change_art_shtrihcod, find_product_url, parse_product_attributes, apply_final_standardization, \
-                                fill_product_category, refill_product_category, separate_existing_products, assign_new_sku_to_products
+                                fill_auxiliary_columns, refill_product_category, separate_existing_products, assign_new_sku_to_products
 
 
 def main():
@@ -99,7 +99,7 @@ def main():
     help="Застосувати фінальні правила заміни з attribute.csv до new.csv."
     )
     
-    # ✨ НОВИЙ АРГУМЕНТ для заповнення категорій
+    # ✨ НОВИЙ АРГУМЕНТ для заповнення допоміжних колонок
     parser.add_argument(
     "--fill-categories",
     action="store_true",
@@ -173,7 +173,7 @@ def main():
         apply_final_standardization()
     elif args.fill_categories:
         print("🗂️ Запускаю заповнення категорій...")
-        fill_product_category()
+        fill_auxiliary_columns()
     elif args.refill_category: 
         print("🔄 Запускаю повторне заповнення категорій та pa_used...")
         refill_product_category()

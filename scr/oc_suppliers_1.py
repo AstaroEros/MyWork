@@ -8,7 +8,7 @@ import re
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from scr.oc_base_function import oc_log_message, load_oc_settings, load_attributes_csv, save_attributes_csv, \
-                                load_category_csv, save_category_csv, load_poznachky_csv
+                                load_category_csv, append_new_categories, load_poznachky_csv
 
 # ОСНОВНА ФУНКЦІЯ 1: Перевірка зміни артикулу і штрихкоду
 def find_change_art_shtrihcod():
@@ -414,7 +414,7 @@ def parse_product_attributes():
     # =========================================================================
     ATTRIBUTE_NAME_MAPPING = {
         "Країна": "Зроблено в|ua",
-        "Марка/Лінія": "Бренд|ua",
+        "Марка/Лінія": "Виробник|ua",
         # Додавайте сюди нові, якщо будуть розбіжності
         # "Матеріал": "Склад тканини|ua", 
     }
@@ -707,162 +707,133 @@ def apply_final_standardization():
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 
-def fill_product_category():
+# ОСНОВНА ФУНКЦІЯ 6: Заповнення допоміжних колонок
+def fill_auxiliary_columns():
     """
-    Заповнює службові колонки у csv:
-    - Q (категорія) на основі M, N, O
-    - T (позначки) на основі назви товару G
-    - U (Rank Math) на основі назви товару G
-    - AV (pa_used) на основі category.csv
-    - V, W, X, Y, AZ фіксованими значеннями
-    - Z (короткий опис) з H
-    - AX (дата)
-    Працює тільки для постачальника з ID=1
+    Адаптовано під структуру БД OpenCart (oc_product, oc_product_description).
+    - Ціна без .00
+    - Дата зростає на 1 хв для кожного товару
     """
     oc_log_message()
-    logging.info("ФУНКЦІЯ 5. Починаю заповнення категорії та службових колонок...")
+    logging.info("ФУНКЦІЯ: Підготовка колонок для OpenCart...")
 
     settings = load_oc_settings()
     try:
-        csv_path = settings['paths']['csv_path_supliers_1_new']
-        supplier_id = 1
-        name_ukr = settings['suppliers']['1']['name_ukr']
+        csv_path = settings['paths']['csv_path_new_product']
+        name_ukr = settings['suppliers'][1]['name_ukr'] 
     except (TypeError, KeyError) as e:
         logging.error(f"Помилка налаштувань: {e}")
         return
 
-    # Індекси колонок
-    M, N, O = 12, 13, 14
-    G, H = 6, 7
-    Q, T, U = 16, 19, 20
-    Z, V, W, X, Y = 25, 21, 22, 23, 24
-    AV, AX, AZ = 47, 49, 51
-
-    # Завантаження правил категорій і позначок
-    category_map, raw_category = load_category_csv()
-    rules_category = category_map.get(supplier_id, {})
+    # Завантаження мап категорій
+    category_map, cat_fieldnames = load_category_csv()
     poznachky_list = load_poznachky_csv()
-    changes_category = False
-    max_row_len_category = len(raw_category[0]) if raw_category else 5
+    
+    new_category_entries = []
+    seen_new_keys = set()
+    
+    # --- ЛОГІКА ДАТИ (Старт о 00:00:00 сьогодні) ---
+    # Беремо поточну дату, але час скидаємо на 00:00:00
+    base_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    temp_path = csv_path + '.oc_temp'
 
-    # Створюємо мапу для pa_used
-    pa_used_map = {}
-    for row in raw_category:
-        if len(row) > 5 and (row[0].strip() == str(supplier_id) or row[0].strip() == ''):
-            key = tuple(v.strip().lower() for v in row[1:4])
-            pa_used_map[key] = row[5].strip()
-
-    logging.info(f"Завантажено {len(pa_used_map)} правил pa_used")
-
-    current_date = datetime.now().strftime('%Y-%m-%dT00:00:00')
-
-    # Функція для вставки нового рядка у category.csv
-    def get_insert_index(supplier_id, raw_data):
-        insert_index = len(raw_data)
-        found_block = False
-        for i, r in enumerate(raw_data):
-            if r and r[0].strip().isdigit():
-                try:
-                    cur_id = int(r[0].strip())
-                    if cur_id == supplier_id:
-                        found_block = True
-                        insert_index = i + 1
-                    elif cur_id > supplier_id and found_block:
-                        return i
-                except ValueError:
-                    continue
-            elif found_block:
-                insert_index = i + 1
-        return insert_index
-
-    temp_path = csv_path + '.category_temp'
     try:
         with open(csv_path, 'r', encoding='utf-8') as infile, \
              open(temp_path, 'w', encoding='utf-8', newline='') as outfile:
 
-            reader = csv.reader(infile)
-            writer = csv.writer(outfile)
-            headers = next(reader)
-            writer.writerow(headers)
+            reader = csv.DictReader(infile)
+            fieldnames = list(reader.fieldnames)
 
-            for idx, row in enumerate(reader):
-                # Розширюємо рядок за потреби
-                max_col = max(M, N, O, Q, T, U, V, W, X, Y, Z, AV, AX, AZ, G, H)
-                if len(row) <= max_col:
-                    row.extend([''] * (max_col + 1 - len(row)))
+            # Додаємо нові OC колонки
+            oc_columns = [
+                'category', 'Категорія|ua', 'Категория|ru', 
+                'Позначки', 
+                'stock_status_id','price', 'status', 'subtract', 
+                'minimum', 'shipping', 'date_added', 
+                'store_id', 'layout_id'
+            ]
+            
+            for col in oc_columns:
+                if col not in fieldnames:
+                    fieldnames.append(col)
 
-                product_name = row[G].strip()
-                product_desc = row[H]
+            writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+            writer.writeheader()
 
-                key = tuple(row[i].strip().lower() for i in (M, N, O))
+            # Використовуємо enumerate, щоб мати індекс рядка (i) для збільшення часу
+            for i, row in enumerate(reader):
+                
+                # --- ЛОГІКА КАТЕГОРІЙ ---
+                c1 = row.get("Категория", "").strip()
+                c2 = row.get("Доп. Категория 1", "").strip()
+                c3 = row.get("Доп. Категория 2", "").strip()
+                lookup_key = tuple(sorted([c1.lower(), c2.lower(), c3.lower()]))
 
-                # --- Категорія Q ---
-                category_val = rules_category.get(key)
-                if category_val is not None:
-                    row[Q] = category_val or ""
+                if lookup_key in category_map:
+                    data = category_map[lookup_key]
+                    row['category']     = data['category']
+                    row['Категорія|ua'] = data['cat_ua']
+                    row['Категория|ru'] = data['cat_ru']
                 else:
-                    # Додаємо новий рядок у category.csv
-                    insert_idx = get_insert_index(supplier_id, raw_category)
-                    new_row = [''] + list(row[M:O+1]) + [''] * (max_row_len_category - 4)
-                    raw_category.insert(insert_idx, new_row)
-                    rules_category[key] = ""
-                    changes_category = True
-                    logging.warning(f"Рядок {idx + 2}: Додана нова комбінація категорії {key}")
+                    if any(lookup_key) and lookup_key not in seen_new_keys:
+                        new_category_entries.append({
+                            'name_1': c1, 'name_2': c2, 'name_3': c3,
+                            'category_name': f"{c1} {c2} {c3}".strip(),
+                            'category': '', 'Категорія|ua': '', 'Категория|ru': ''
+                        })
+                        seen_new_keys.add(lookup_key)
+                    row['category'] = ''
+                    row['Категорія|ua'] = ''
+                    row['Категория|ru'] = ''
 
-                # --- Позначки T ---
-                if product_name and poznachky_list:
-                    found_tags = []
-                    covered = []
-                    name_lower = product_name.lower()
-                    for tag in poznachky_list:
-                        if tag in name_lower:
-                            start, end = name_lower.find(tag), name_lower.find(tag) + len(tag)
-                            if not any(s <= start and end <= e for s, e in covered):
-                                found_tags.append(tag.capitalize())
-                                covered.append((start, end))
-                                covered.sort(key=lambda x: x[1]-x[0], reverse=True)
-                    if found_tags:
-                        row[T] = ', '.join(found_tags)
+                # --- ЛОГІКА ПОЗНАЧОК ---
+                prod_name = row.get("Название_позиции", "")
+                if prod_name and poznachky_list:
+                    found = [tag.capitalize() for tag in poznachky_list if tag in prod_name.lower()]
+                    row["Позначки"] = ', '.join(sorted(list(set(found)))) if found else ""
 
-                # --- Rank Math U ---
-                if product_name:
-                    cleaned = re.sub(r'[а-яА-Я0-9]', '', product_name)
-                    cleaned = re.sub(r'[^a-zA-Z\s]', '', cleaned)
-                    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-                    row[U] = cleaned
+                # --- 3. ЗАПОВНЕННЯ OPENCART ДАНИХ ---
+                
+                row["status"] = "0" 
+                row["stock_status_id"] = "7" 
+                row["subtract"] = "1"
+                row["minimum"] = "1"
+                row["shipping"] = "1"
 
-                # --- pa_used AV ---
-                pa_val = pa_used_map.get(key)
-                if pa_val:
-                    row[AV] = pa_val
+                # === ВИПРАВЛЕННЯ ЦІНИ ===
+                try:
+                    # 1. Заміна коми на крапку, видалення пробілів
+                    raw_price_str = row.get("Цена", "0").replace(',', '.').replace(' ', '')
+                    # 2. Перетворення у float (щоб зрозуміти "802.00")
+                    price_float = float(raw_price_str)
+                    # 3. Перетворення у int (відкидає дробову частину: 802.99 -> 802, 802.00 -> 802)
+                    # Якщо вам важливо округляти математично, використовуйте round(price_float)
+                    price_int = int(price_float)
+                    row["price"] = str(price_int)
+                except ValueError:
+                    row["price"] = "0"
 
+                # === ВИПРАВЛЕННЯ ДАТИ ===
+                # Додаємо i хвилин до базового часу
+                # i=0 -> 00:00, i=1 -> 00:01, i=2 -> 00:02...
+                row_time = base_date + timedelta(minutes=i)
+                row["date_added"] = row_time.strftime('%Y-%m-%d %H:%M:%S')
 
-                # --- Фіксовані колонки ---
-                row[V] = name_ukr
-                row[W] = "draft"
-                row[X] = "yes"
-                row[Y] = "none"
-                row[AZ] = "simple"
-                row[AX] = current_date
-
-                # --- Короткий опис Z ---
-                if product_desc:
-                    row[Z] = product_desc.split('\\n', 1)[0].strip()
-                else:
-                    row[Z] = ""
+                row["store_id"] = "0"
+                row["layout_id"] = "0"
+                row["postachalnyk"] = name_ukr
 
                 writer.writerow(row)
 
         os.replace(temp_path, csv_path)
-        logging.info("Заповнення категорій та службових колонок завершено.")
+        logging.info("Файл оновлено під стандарт OpenCart.")
 
-        if changes_category:
-            save_category_csv(raw_category)
-        else:
-            logging.info("Збереження category.csv не потрібне. Змін: False.")
+        if new_category_entries:
+            append_new_categories(new_category_entries, cat_fieldnames)
 
     except Exception as e:
-        logging.error(f"Помилка при заповненні колонок: {e}")
+        logging.error(f"Помилка: {e}")
         if os.path.exists(temp_path):
             os.remove(temp_path)
 

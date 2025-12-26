@@ -451,116 +451,124 @@ def oc_import_categories_from_csv():
         cursor.close()
         conn.close()
 
+# --- 8. ЗАВАНТАЖЕННЯ КАТЕГОРІЙ (Нова логіка)
 def load_category_csv():
     """
-    Завантажує правила заміни категорій з category.csv.
+    Завантажує правила мапінгу з category.csv.
     Повертає:
-    1. category_map: Словник {supplier_id: {(name1, name2, name3): category_value}}
-    2. raw_data: Список сирих рядків для збереження структури файлу.
+    1. category_map: Словник {(name1, name2, name3): {'id':..., 'ua':..., 'ru':...}}
+    2. fieldnames: Список заголовків файлу (щоб знати, як дописувати нові).
     """
-    category_path = "/var/www/scripts/update/config/category.csv"
+    settings = load_oc_settings()
+    category_csv_path = settings['paths']['category_csv']
     category_map = {}
-    raw_data = []          
     
-    default_header = ["postachalnyk", "name_1", "name_2", "name_3", "category"]
-    current_supplier_id = None
+    # Стандартні заголовки, якщо файл порожній
+    fieldnames = ['name_1', 'name_2', 'name_3', 'category_name', 'category', 'Категорія|ua', 'Категория|ru']
 
     try:
-        with open(category_path, 'r', encoding='utf-8') as f:
-            reader = csv.reader(f)
+        with open(category_csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
             
-            try:
-                header = next(reader)
-                raw_data.append(header)
-                max_row_len = len(header)
-            except StopIteration:
-                return {}, [default_header]
+            if reader.fieldnames:
+                fieldnames = reader.fieldnames
 
             for row in reader:
-                row = row[:max_row_len] + [''] * (max_row_len - len(row))
-                raw_data.append(row)
+                # Очищаємо та приводимо до нижнього регістру вхідні назви
+                n1 = row.get('name_1', '').strip().lower()
+                n2 = row.get('name_2', '').strip().lower()
+                n3 = row.get('name_3', '').strip().lower()
                 
-                # 1. Якщо це рядок-заголовок постачальника (наприклад, "1",,,,)
-                if row and row[0].strip().isdigit():
-                    try:
-                        current_supplier_id = int(row[0].strip())
-                        if current_supplier_id not in category_map:
-                            category_map[current_supplier_id] = {}
-                    except ValueError:
-                        current_supplier_id = None
-                        continue
-                
-                # 2. Якщо це рядок-правило (наприклад, ,"Ляльки","Кукли","Надувні","Надувні ляльки")
-                elif current_supplier_id is not None and len(row) >= 5:
-                    
-                    # Ключі для мапи: (name_1, name_2, name_3) - всі в нижньому регістрі
-                    key_tuple = (
-                        row[1].strip().lower(), 
-                        row[2].strip().lower(), 
-                        row[3].strip().lower()
-                    )
-                    
-                    # Значення: category (без зміни регістру)
-                    category_value = row[4].strip()
-                    
-                    category_map[current_supplier_id][key_tuple] = category_value
+                # Якщо рядок порожній (немає назв), пропускаємо
+                if not any([n1, n2, n3]):
+                    continue
 
-        return category_map, raw_data
-    
+                # Сортуємо для створення унікального ключа незалежно від порядку слів у товарі
+                key = tuple(sorted([n1, n2, n3]))
+                
+                category_map[key] = {
+                    'category': row.get('category', '').strip(),
+                    'cat_ua':   row.get('Категорія|ua', '').strip(),
+                    'cat_ru':   row.get('Категория|ru', '').strip()
+                }
+
+        return category_map, fieldnames
+
     except FileNotFoundError:
-        logging.warning(f"Файл категорій 'category.csv' не знайдено. Буде створено новий.")
-        return {}, [default_header]
+        logging.warning(f"Файл 'category.csv' не знайдено. Буде створено новий при збереженні.")
+        return {}, fieldnames
     except Exception as e:
-        logging.error(f"Виникла помилка при завантаженні category.csv: {e}")
-        return {}, [default_header]
+        logging.error(f"Помилка при читанні category.csv: {e}")
+        return {}, fieldnames
 
-def save_category_csv(raw_data):
+# --- 9. ДОДАВАННЯ НОВИХ КАТЕГОРІЙ (Append)
+def append_new_categories(new_rows, fieldnames):
     """
-    Зберігає оновлені сирі дані у category.csv.
+    Дописує нові знайдені комбінації в кінець category.csv.
+    Використовує DictWriter для точності.
     """
-    category_path = "/var/www/scripts/update/config/category.csv"
+    if not new_rows:
+        return
+
+    settings = load_oc_settings()
+    category_csv_path = settings['paths']['category_csv']
+    
     try:
-        with open(category_path, 'w', encoding='utf-8', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerows(raw_data)
-        logging.info("Файл категорій category.csv оновлено.")
+        # Перевіряємо, чи файл існує (щоб записати хедер, якщо ні)
+        file_exists = os.path.isfile(category_csv_path)
+        
+        with open(category_csv_path, 'a', encoding='utf-8', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            
+            if not file_exists:
+                writer.writeheader()
+            
+            # Записуємо тільки нові рядки
+            for row in new_rows:
+                # Фільтруємо row, залишаючи тільки ті ключі, що є в fieldnames
+                clean_row = {k: row.get(k, '') for k in fieldnames}
+                writer.writerow(clean_row)
+                
+        logging.info(f"У файл category.csv додано {len(new_rows)} нових правил.")
+        
     except Exception as e:
-        logging.error(f"Помилка при збереженні файлу категорій category.csv: {e}")
+        logging.error(f"Помилка при запису в category.csv: {e}")
 
+# --- 10.  ЗАВАНТАЖЕННЯ ПОЗНАЧОК (Виправлено шлях)
 def load_poznachky_csv():
     """
-    Завантажує статичний список позначок з poznachky.csv.
-    Повертає:
-    1. poznachky_list: Список унікальних позначок (у нижньому регістрі).
+    Завантажує список тегів з poznachky.csv.
     """
-    poznachky_path = "/var/www/scripts/update/config/poznachky.csv"
+    settings = load_oc_settings()
+    poznachky_csv_path = settings['paths']['poznachky_csv'] 
+    
     poznachky_list = []
     
     try:
-        with open(poznachky_path, 'r', encoding='utf-8') as f:
+        with open(poznachky_csv_path, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
-            
+            # Пробуємо пропустити заголовок, якщо він є
             try:
-                # Пропускаємо заголовок "Poznachky"
-                next(reader) 
+                first_row = next(reader)
+                # Якщо перший рядок схожий на заголовок, ігноруємо, інакше додаємо
+                if first_row and "poznachky" not in first_row[0].lower():
+                     poznachky_list.append(first_row[0].strip().lower())
             except StopIteration:
-                return []
+                pass 
 
             for row in reader:
                 if row and row[0].strip():
-                    # Зберігаємо позначки у нижньому регістрі для універсального порівняння
                     poznachky_list.append(row[0].strip().lower())
 
-        # Сортуємо від найдовших до найкоротших, щоб знайти найкраще співпадіння
+        # Сортуємо: спочатку довгі фрази, щоб "вібратор кролик" знайшовся раніше ніж просто "вібратор"
         poznachky_list.sort(key=len, reverse=True)
-        
         return poznachky_list
     
     except FileNotFoundError:
-        logging.warning(f"Файл позначок 'poznachky.csv' не знайдено.")
+        logging.warning(f"Файл позначок '{poznachky_csv_path}' не знайдено. Пропускаємо.")
         return []
     except Exception as e:
-        logging.error(f"Виникла помилка при завантаженні poznachky.csv: {e}")
+        logging.error(f"Помилка poznachky.csv: {e}")
         return []
 
 # --- ПЕРЕВІРКА CSV ---
