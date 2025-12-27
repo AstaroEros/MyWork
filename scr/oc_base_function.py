@@ -1,9 +1,7 @@
-import os
-import yaml
-import logging
-import pymysql
-import csv
+import os, yaml, logging, pymysql, csv, shutil, requests, mimetypes, hashlib
 from datetime import datetime
+from bs4 import BeautifulSoup
+from typing import Dict, List
 
 
 # --- 1. ЗАВАНТАЖЕННЯ НАЛАШТУВАНЬ OPENCART ---
@@ -714,3 +712,245 @@ def check_csv_data(profile_id):
 
     oc_log_message("✅ Перевірка CSV успішна")
     return True
+
+# --- ОБРОБКА ЗОБРАЖЕНЬ ---   
+def clear_directory(folder_path: str):
+    """Очищає або створює директорію."""
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path, exist_ok=True)
+        return
+    for item in os.listdir(folder_path):
+        path = os.path.join(folder_path, item)
+        try:
+            if os.path.isfile(path) or os.path.islink(path):
+                os.unlink(path)
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
+        except Exception as e:
+            logging.error(f"❌ Не вдалося видалити {path}: {e}")
+
+def move_gifs(src: str, dest: str) -> int:
+    """Переміщує всі GIF із src у dest."""
+    moved = 0
+    os.makedirs(dest, exist_ok=True)
+    for root, _, files in os.walk(src):
+        for f in files:
+            if f.lower().endswith('.gif'):
+                src_path = os.path.join(root, f)
+                rel = os.path.relpath(src_path, src)
+                dest_path = os.path.join(dest, rel)
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                shutil.move(src_path, dest_path)
+                moved += 1
+    logging.info(f"🟣 Переміщено {moved} GIF-файлів.")
+    return moved
+
+def convert_to_webp_square(src: str, dest: str) -> int:
+    """
+    Конвертує JPG/PNG → WEBP, вирівнює зображення до квадрату
+    та коректно обробляє прозорість (RGBA / палітрові P-зображення).
+    """
+    from PIL import Image
+
+    converted = 0
+
+    for root, _, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        out_dir = os.path.join(dest, rel)
+        os.makedirs(out_dir, exist_ok=True)
+
+        for f in files:
+            if not f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                continue
+
+            try:
+                img_path = os.path.join(root, f)
+                img = Image.open(img_path)
+
+                # 🔹 Конвертація кольорового режиму (для уникнення warning)
+                if img.mode == "P":
+                    img = img.convert("RGBA")
+                elif img.mode not in ("RGB", "RGBA"):
+                    img = img.convert("RGB")
+
+                w, h = img.size
+                max_side = max(w, h)
+
+                # 🔹 Якщо зображення має альфа-канал — створюємо прозоре полотно
+                if img.mode == "RGBA":
+                    canvas = Image.new("RGBA", (max_side, max_side), (255, 255, 255, 0))
+                else:
+                    canvas = Image.new("RGB", (max_side, max_side), (255, 255, 255))
+
+                # Центрування
+                canvas.paste(img, ((max_side - w) // 2, (max_side - h) // 2))
+
+                # 🔹 Збереження у форматі WEBP
+                new_name = os.path.splitext(f)[0] + '.webp'
+                out_path = os.path.join(out_dir, new_name)
+                canvas.save(out_path, 'webp', quality=90)
+
+                converted += 1
+
+            except Exception as e:
+                logging.error(f"❌ WEBP-конвертація '{f}' не вдалася: {e}")
+
+    logging.info(f"🟢 WEBP-конвертовано {converted} зображень.")
+    return converted
+
+# --- ЗАВАНТАЖЕННЯ ЗОБРАЖЕНЬ ТОВАРУ (З ВИДАЛЕННЯМ ДУБЛІКАТІВ) ---
+def download_product_images(url: str, sku: str, category: str, base_path: str, cat_map: Dict[str, str]) -> List[str]:
+    """
+    Завантажує зображення, гарантуючи:
+    1. Main фото перше.
+    2. Відсутність візуальних дублікатів (за MD5 хешем).
+    """
+    cat_slug = cat_map.get(category.strip()) or category.strip().lower().replace(' ', '_').replace(',', '')
+    dest = os.path.join(base_path, cat_slug)
+    os.makedirs(dest, exist_ok=True)
+
+    try:
+        page = requests.get(url, timeout=10)
+        page.raise_for_status()
+    except Exception as e:
+        logging.warning(f"⚠️ Не вдалося завантажити сторінку {url}: {e}")
+        return []
+
+    soup = BeautifulSoup(page.content, 'html.parser')
+    
+    collected_urls = []
+
+    # 1. 🥇 Шукаємо ГОЛОВНЕ зображення
+    main_img_tag = soup.find('a', class_='main_image_container')
+    if main_img_tag and main_img_tag.get('href'):
+        link = main_img_tag.get('href')
+        if link not in collected_urls:
+            collected_urls.append(link)
+
+    # 2. 🥈 Шукаємо МІНІАТЮРИ
+    thumbs = soup.find_all('a', class_='thumb_image_container')
+    for a in thumbs:
+        link = a.get('href')
+        if link and link not in collected_urls:
+            collected_urls.append(link)
+
+    if not collected_urls:
+        logging.warning(f"⚠️ Зображень не знайдено для SKU {sku}")
+        return []
+
+    saved_files = []
+    seen_hashes = set()  # Тут будемо зберігати "відбитки" вже скачаних фото
+    
+    counter = 1 # Лічильник для назв файлів
+
+    for img_url in collected_urls:
+        try:
+            r = requests.get(img_url, timeout=10)
+            r.raise_for_status()
+            content = r.content
+
+            # --- ПЕРЕВІРКА НА ДУБЛІКАТИ ---
+            # Рахуємо MD5 хеш картинки
+            img_hash = hashlib.md5(content).hexdigest()
+
+            # Якщо такий хеш вже був у цього товару — пропускаємо
+            if img_hash in seen_hashes:
+                # logging.info(f"♻️ Пропущено дублікат: {img_url}")
+                continue
+            
+            # Якщо це нове унікальне фото — додаємо хеш у базу
+            seen_hashes.add(img_hash)
+            # -------------------------------
+
+            # Визначаємо розширення
+            mime = r.headers.get('Content-Type')
+            ext = mimetypes.guess_extension(mime) or '.jpg'
+            
+            fname = f"{sku}-{counter}{ext}"
+            counter += 1 # Збільшуємо лічильник тільки якщо реально зберегли файл
+            
+            file_path = os.path.join(dest, fname)
+            with open(file_path, 'wb') as f:
+                f.write(content)
+            
+            saved_files.append(fname)
+
+        except Exception as e:
+            logging.warning(f"❌ Помилка завантаження {img_url}: {e}")
+            continue
+
+    logging.info(f"📸 SKU {sku}: Знайдено посилань: {len(collected_urls)}, Збережено унікальних: {len(saved_files)}")
+    return saved_files
+
+# --- СИНХРОНІЗАЦІЯ КОЛОНКИ WEBP У CSV ---
+def sync_webp_column_named(csv_path: str, webp_path: str) -> int:
+    """
+    Сканує папку webp_path і записує назви файлів у колонку 'image_name_webp'
+    на основі 'sku'.
+    """
+    # 1. Збираємо файли з папки
+    sku_map = {}
+    for root, _, files in os.walk(webp_path):
+        for f in files:
+            if '-' in f and f.lower().endswith(('.webp', '.gif')):
+                file_sku = f.split('-')[0] # Припускаємо назву "sku-1.webp"
+                sku_map.setdefault(file_sku, []).append(f)
+
+    updated_count = 0
+    rows = []
+    fieldnames = []
+
+    # 2. Читаємо та оновлюємо CSV
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        
+        # Якщо колонки немає - додаємо в список заголовків
+        if 'image_name_webp' not in fieldnames:
+             fieldnames.append('image_name_webp')
+
+        for row in reader:
+            # 👉 ПРЯМЕ ВИКОРИСТАННЯ НАЗВИ КОЛОНКИ:
+            current_sku = row.get('sku', '').strip()
+            
+            if current_sku in sku_map:
+                # Склеюємо список файлів через кому
+                row['image_name_webp'] = ', '.join(sorted(sku_map[current_sku]))
+                updated_count += 1
+            
+            rows.append(row)
+
+    # 3. Записуємо результат
+    with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    logging.info(f"🔁 Оновлено {updated_count} SKU у колонці 'image_name_webp'.")
+    return updated_count
+
+# --- КОПІЮВАННЯ ФАЙЛІВ У ФІНАЛЬНУ ДИРЕКТОРІЮ ---
+def copy_to_site(src: str, dest: str):
+    """Копіює WEBP/GIF до фінальної директорії з правами."""
+    uid, gid = 33, 33
+    fperm, dperm = 0o644, 0o755
+    copied = 0
+
+    for root, _, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        out_dir = os.path.join(dest, rel)
+        os.makedirs(out_dir, mode=dperm, exist_ok=True)
+        for f in files:
+            if not f.lower().endswith(('.webp', '.gif')):
+                continue
+            src_f = os.path.join(root, f)
+            dst_f = os.path.join(out_dir, f)
+            shutil.copy2(src_f, dst_f)
+            try:
+                os.chown(dst_f, uid, gid)
+                os.chmod(dst_f, fperm)
+                copied += 1
+            except PermissionError:
+                logging.warning(f"⚠️ Немає прав для зміни власника {dst_f}")
+    logging.info(f"📦 Скопійовано {copied} файлів у {dest}.")
+    return copied

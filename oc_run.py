@@ -4,7 +4,8 @@ from scr.oc_base_function import oc_import_categories_from_csv, check_csv_data
 from scr.oc_products import oc_export_products, download_supplier_price_list, \
                             process_supplier_1_price_list, process_supplier_2_price_list, process_supplier_3_price_list
 from scr.oc_suppliers_1 import find_new_products, find_change_art_shtrihcod, find_product_url, parse_product_attributes, apply_final_standardization, \
-                                fill_auxiliary_columns, refill_product_category, separate_existing_products, assign_new_sku_to_products
+                                fill_auxiliary_columns, refill_product_category, separate_existing_products, assign_new_sku_to_products, \
+                                process_phase_1_download, process_phase_2_finish
 
 
 def main():
@@ -126,6 +127,20 @@ def main():
     action="store_true",
     help="Знайти найбільший SKU у zalishki.csv та присвоїти послідовні SKU новим товарам у new.csv (колонка P/15)."
     )
+    
+    # ✨ ЕТАП 1: Завантаження зображень
+    parser.add_argument(
+        "--download-images",
+        action="store_true",
+        help="Запуск Етапу 1: Очистка папок та завантаження фото (JPG) з посилань."
+    )
+
+    # ✨ ЕТАП 2: Обробка та публікація
+    parser.add_argument(
+        "--process-images",
+        action="store_true",
+        help="Запуск Етапу 2: Конвертація WEBP, переміщення GIF, оновлення CSV та копіювання на сайт."
+    )
 
     # 3. Парсинг аргументів
     args = parser.parse_args()
@@ -183,7 +198,12 @@ def main():
     elif args.assign_sku:
         print("🔢 Запускаю присвоєння нових SKU...")
         assign_new_sku_to_products()
-
+    elif args.download_images:
+        print("📸 Запускаю ЕТАП 1: Завантаження зображень...")
+        process_phase_1_download()
+    elif args.process_images:
+        print("⚙️ Запускаю ЕТАП 2: Обробка та копіювання зображень...")
+        process_phase_2_finish()
     else:
         print("❌ Не вказано жодної дії. Використайте --help для отримання списку команд.\n")
         parser.print_help()
