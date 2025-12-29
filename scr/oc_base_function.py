@@ -1,4 +1,4 @@
-import os, yaml, logging, pymysql, csv, shutil, requests, mimetypes, hashlib
+import os, yaml, logging, pymysql, csv, shutil, requests, mimetypes, hashlib, re, html, time
 from datetime import datetime
 from bs4 import BeautifulSoup
 from typing import Dict, List
@@ -535,39 +535,53 @@ def append_new_categories(new_rows, fieldnames):
 # --- 10.  ЗАВАНТАЖЕННЯ ПОЗНАЧОК (Виправлено шлях)
 def load_poznachky_csv():
     """
-    Завантажує список тегів з poznachky.csv.
+    Завантажує словник позначок із CSV файлу.
+    Повертає словник {ua_tag: ru_tag}, де ключ - це UA назва (lower case), а значення - RU переклад.
     """
-    settings = load_oc_settings()
+    settings = load_oc_settings()  # Використовуємо ту саму функцію налаштувань, що й в основному коді
     poznachky_csv_path = settings['paths']['poznachky_csv'] 
     
-    poznachky_list = []
+    temp_list = [] # Тимчасовий список для зчитування пар [UA, RU]
     
     try:
         with open(poznachky_csv_path, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
-            # Пробуємо пропустити заголовок, якщо він є
+            
+            # --- Логіка пропуску заголовка (як у вашому прикладі) ---
             try:
                 first_row = next(reader)
-                # Якщо перший рядок схожий на заголовок, ігноруємо, інакше додаємо
-                if first_row and "poznachky" not in first_row[0].lower():
-                     poznachky_list.append(first_row[0].strip().lower())
+                # Якщо перший рядок НЕ містить слово "poznachky", і має 2 колонки, беремо його як дані
+                if first_row and len(first_row) >= 2 and "poznachky" not in first_row[0].lower():
+                    temp_list.append(first_row)
             except StopIteration:
                 pass 
 
+            # --- Зчитування решти рядків ---
             for row in reader:
-                if row and row[0].strip():
-                    poznachky_list.append(row[0].strip().lower())
+                # Перевіряємо, щоб було мінімум 2 колонки (UA та RU) і перша не пуста
+                if row and len(row) >= 2 and row[0].strip():
+                    temp_list.append(row)
 
-        # Сортуємо: спочатку довгі фрази, щоб "вібратор кролик" знайшовся раніше ніж просто "вібратор"
-        poznachky_list.sort(key=len, reverse=True)
-        return poznachky_list
+        # Сортуємо: спочатку довгі фрази (ua_tag), як ви хотіли
+        # key=lambda x: len(x[0]) сортує за довжиною першої колонки (UA)
+        temp_list.sort(key=lambda x: len(x[0]), reverse=True)
+        
+        # Перетворюємо відсортований список у словник
+        tags_dict = {}
+        for row in temp_list:
+            ua_tag = row[0].strip().lower() # Ключ для пошуку (маленькі літери)
+            ru_tag = row[1].strip()         # Значення (переклад)
+            tags_dict[ua_tag] = ru_tag
+
+        logging.info(f"📚 Завантажено {len(tags_dict)} перекладів позначок.")
+        return tags_dict
     
     except FileNotFoundError:
-        logging.warning(f"Файл позначок '{poznachky_csv_path}' не знайдено. Пропускаємо.")
-        return []
+        logging.warning(f"⚠️ Файл позначок '{poznachky_csv_path}' не знайдено. Пропускаємо.")
+        return {}
     except Exception as e:
-        logging.error(f"Помилка poznachky.csv: {e}")
-        return []
+        logging.error(f"❌ Помилка читання poznachky.csv: {e}")
+        return {}
 
 # --- ПЕРЕВІРКА CSV ---
 def check_csv_data(profile_id):
@@ -885,15 +899,28 @@ def download_product_images(url: str, sku: str, category: str, base_path: str, c
 # --- СИНХРОНІЗАЦІЯ КОЛОНКИ WEBP У CSV ---
 def sync_webp_column_named(csv_path: str, webp_path: str) -> int:
     """
-    Сканує папку webp_path і записує назви файлів у колонку 'image_name_webp'
-    на основі 'sku'.
+    Сканує папку webp_path і записує назви файлів у колонку 'image_name_webp'.
+    Логіка:
+    1. Файл 'sku.webp' вважається головним.
+    2. Файли 'sku-1.webp', 'sku-2.webp' - додатковими.
     """
+    logging.info("🔄 Початок синхронізації WebP з CSV...")
+
     # 1. Збираємо файли з папки
     sku_map = {}
     for root, _, files in os.walk(webp_path):
         for f in files:
-            if '-' in f and f.lower().endswith(('.webp', '.gif')):
-                file_sku = f.split('-')[0] # Припускаємо назву "sku-1.webp"
+            if f.lower().endswith(('.webp', '.gif')):
+                # Отримуємо ім'я без розширення (напр. '12345-1' або '12345')
+                name_body = os.path.splitext(f)[0]
+                
+                if '-' in name_body:
+                    # Варіант: 12345-1.webp -> SKU = 12345
+                    file_sku = name_body.split('-')[0]
+                else:
+                    # Варіант: 12345.webp -> SKU = 12345 (Ваш випадок!)
+                    file_sku = name_body
+                
                 sku_map.setdefault(file_sku, []).append(f)
 
     updated_count = 0
@@ -905,17 +932,24 @@ def sync_webp_column_named(csv_path: str, webp_path: str) -> int:
         reader = csv.DictReader(f)
         fieldnames = reader.fieldnames
         
-        # Якщо колонки немає - додаємо в список заголовків
         if 'image_name_webp' not in fieldnames:
              fieldnames.append('image_name_webp')
 
         for row in reader:
-            # 👉 ПРЯМЕ ВИКОРИСТАННЯ НАЗВИ КОЛОНКИ:
             current_sku = row.get('sku', '').strip()
             
             if current_sku in sku_map:
-                # Склеюємо список файлів через кому
-                row['image_name_webp'] = ', '.join(sorted(sku_map[current_sku]))
+                images = sku_map[current_sku]
+                
+                # --- ХИТРЕ СОРТУВАННЯ ---
+                # Ми хочемо, щоб '12345.webp' було першим, а '12345-1.webp' далі.
+                # Lambda повертає кортеж. False (0) сортується перед True (1).
+                # 1. (x != f"{current_sku}.webp") -> Якщо назва точна, це 0 (на початок).
+                # 2. x -> Далі сортуємо просто за алфавітом.
+                
+                images.sort(key=lambda x: (x != f"{current_sku}.webp", x))
+                
+                row['image_name_webp'] = ', '.join(images)
                 updated_count += 1
             
             rows.append(row)
@@ -954,3 +988,207 @@ def copy_to_site(src: str, dest: str):
                 logging.warning(f"⚠️ Немає прав для зміни власника {dst_f}")
     logging.info(f"📦 Скопійовано {copied} файлів у {dest}.")
     return copied
+
+def fill_opencart_paths_single_file():
+    """
+    Працює з одним файлом (csv_path_new_product).
+    Бере дані з колонки 'image_name_webp' і заповнює 'main_img_path' та 'img_path'.
+    Не сканує диск.
+    """
+    logging.info("🖼️ ЕТАП 6. Генерація шляхів OpenCart (внутрішня обробка CSV)...")
+
+    settings = load_oc_settings()
+    try:
+        # Працюємо тільки з цим файлом
+        csv_file = settings['paths']['csv_path_new_product']
+        cat_map = settings['categories']
+    except KeyError as e:
+        logging.error(f"❌ Не знайдено налаштування: {e}")
+        return
+
+    updated_count = 0
+    rows = []
+    fieldnames = []
+    
+    # Константа шляху OpenCart
+    OC_BASE = "catalog/product/"
+
+    # --- Читання та обробка ---
+    with open(csv_file, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        
+        # Переконуємось, що потрібні колонки існують у заголовку
+        for col in ['main_img_path', 'img_path']:
+            if col not in fieldnames:
+                fieldnames.append(col)
+
+        for row in reader:
+            # Отримуємо список файлів, який ми записали на кроці 'sync_webp'
+            # Наприклад: "sku.webp, sku-1.webp, sku-2.webp"
+            img_str = row.get('image_name_webp', '').strip()
+            
+            # Отримуємо категорію для формування шляху папки
+            raw_cat = row.get('category', '').strip()
+
+            if img_str and raw_cat:
+                # 1. Визначаємо назву папки (Slug)
+                # Логіка має співпадати з тією, куди ми завантажували файли
+                folder_slug = cat_map.get(raw_cat)
+                if not folder_slug:
+                    folder_slug = raw_cat.lower().replace(' ', '_').replace(',', '')
+                
+                # 2. Розбиваємо рядок на список файлів
+                files_list = [x.strip() for x in img_str.split(',') if x.strip()]
+                
+                # 3. Формуємо повні шляхи
+                # files_list вже відсортований правильно (sku.webp перший)
+                full_paths = [f"{OC_BASE}{folder_slug}/{filename}" for filename in files_list]
+
+                if full_paths:
+                    # Головне фото (перше)
+                    row['main_img_path'] = full_paths[0]
+                    
+                    # Додаткові фото (решта)
+                    if len(full_paths) > 1:
+                        row['img_path'] = ','.join(full_paths[1:])
+                    else:
+                        row['img_path'] = ''
+                    
+                    updated_count += 1
+            else:
+                # Якщо фото немає, очищаємо поля, щоб не лишилося старого сміття
+                row['main_img_path'] = ''
+                row['img_path'] = ''
+
+            rows.append(row)
+
+    # --- Запис результату ---
+    with open(csv_file, 'w', encoding='utf-8', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    logging.info(f"✅ Шляхи згенеровано для {updated_count} товарів.")
+
+# --- ПЕРЕКЛАД РЯДКІВ НА РОС ---
+def get_deepl_usage(api_key, api_url="https://api-free.deepl.com/v2/usage"):
+    """
+    Перевіряє використання символів DeepL API (Free або Pro).
+    Повертає словник з used_characters, limit, remaining.
+    """
+    try:
+        response = requests.get(api_url, headers={"Authorization": f"DeepL-Auth-Key {api_key}"}, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        used = data.get("character_count", 0)
+        limit = data.get("character_limit", 0)
+        remaining = limit - used if limit else None
+        logging.info(f"🔹 Використано {used:,} із {limit:,} символів DeepL (залишилось {remaining:,})")
+        return {"used": used, "limit": limit, "remaining": remaining}
+    except Exception as e:
+        logging.warning(f"⚠️ Не вдалося отримати інформацію про ліміт DeepL: {e}")
+        return None
+    
+def strip_html_tags(text):
+    """Видаляє HTML теги з тексту (для Meta Description)"""
+    if not text: 
+        return ""
+    clean = re.compile('<.*?>')
+    return re.sub(clean, '', text)
+
+def get_first_sentence(text):
+    """Бере текст, чистить від HTML і повертає перше речення"""
+    plain_text = strip_html_tags(text)
+    # Розбиваємо по крапці, знаку оклику або питання
+    match = re.split(r'(?<=[.!?])\s+', plain_text, 1)
+    if match:
+        return match[0].strip()
+    return plain_text.strip()
+
+def translate_text_deepl(text, target_lang="RU", api_key=None, api_url=None):
+    """
+    Переклад через DeepL із БЕЗПЕЧНИМ збереженням HTML:
+    - HTML-теги (<strong>, <em>, <p> тощо) НЕ відправляються в DeepL і повертаються як є.
+    - Перекладаються лише текстові сегменти між тегами.
+    - Сегменти без кирилиці (англ/цифри) не перекладаються взагалі.
+    - Довгі сегменти ріжуться на частини ≤ 500 символів.
+    """
+    if not text or not text.strip():
+        return text
+    if not api_key:
+        logging.error("API ключ DeepL не вказано!")
+        return text
+    if not api_url:
+        api_url = "https://api-free.deepl.com/v2/translate"
+
+    # 1) Розділити рядок на HTML-теги і прості текстові сегменти
+    #    Приклад: ["<p>", "Текст ", "<strong>", "жирний", "</strong>", "</p>"]
+    tokens = re.split(r'(<[^>]+>)', text)
+    out = []
+
+    # регексп для виявлення кирилиці (укр/ru)
+    has_cyrillic = re.compile(r'[А-Яа-яЁёЇїІіЄєҐґ]')
+
+    def translate_chunk(chunk: str) -> str:
+        """Перекласти один короткий текстовий шматок (≤500 символів)."""
+        # якщо немає кирилиці — повертаємо як є (англ/цифри не чіпаємо)
+        if not has_cyrillic.search(chunk):
+            return chunk
+        # жодних службових <i>-тегів усередину — працюємо з чистим текстом
+        try:
+            resp = requests.post(
+                api_url,
+                data={
+                    "auth_key": api_key,
+                    "text": chunk,
+                    "target_lang": target_lang,
+                },
+                timeout=30
+            )
+            resp.raise_for_status()
+            translated = resp.json()["translations"][0]["text"]
+            # Якщо DeepL раптом повернув &lt;strong&gt; у тексті, розкодуємо сутності тільки в тексті
+            return html.unescape(translated)
+        except Exception as e:
+            logging.error(f"Помилка перекладу: {e}")
+            return chunk
+
+    # 2) Обробити кожен токен
+    for tok in tokens:
+        if not tok:
+            continue
+        if tok.startswith("<") and tok.endswith(">"):
+            # Це HTML-тег — повертаємо як є
+            out.append(tok)
+            continue
+
+        # Це простий текст — ріжемо на частини ≤ 500 символів по границях речень/рядків
+        text_part = tok
+        if not text_part.strip():
+            out.append(text_part)
+            continue
+
+        # м’яке речення/параграфне ділення
+        pieces = []
+        current = ""
+        # розбиваємо за кінцем речення або переносом, зберігаючи роздільники
+        for seg in re.split(r'(\. |\n)', text_part):
+            if len(current) + len(seg) <= 500:
+                current += seg
+            else:
+                if current:
+                    pieces.append(current)
+                current = seg
+        if current:
+            pieces.append(current)
+
+        # переклад кожного шматка
+        translated_pieces = []
+        for p in pieces:
+            translated_pieces.append(translate_chunk(p))
+            time.sleep(0.4)  # легкий тротлінг
+
+        out.append("".join(translated_pieces))
+
+    return "".join(out)

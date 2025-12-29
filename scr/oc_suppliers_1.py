@@ -10,7 +10,8 @@ from bs4 import BeautifulSoup
 from scr.oc_base_function import oc_log_message, load_oc_settings, load_attributes_csv, save_attributes_csv, \
                                 load_category_csv, append_new_categories, load_poznachky_csv, clear_directory, \
                                 download_product_images, move_gifs, convert_to_webp_square, sync_webp_column_named, \
-                                copy_to_site
+                                copy_to_site, fill_opencart_paths_single_file, get_deepl_usage, translate_text_deepl, \
+                                get_first_sentence
 
 # ОСНОВНА ФУНКЦІЯ 1: Перевірка зміни артикулу і штрихкоду
 def find_change_art_shtrihcod():
@@ -1253,8 +1254,147 @@ def process_phase_2_finish():
     sync_webp_column_named(csv_path, webp_path)
     logging.info("5. ✅ Оновлення колонки WEBP у CSV завершено.")
 
-    # 6️⃣ Копіювання
+    # 6️⃣ На основі колонки 'image_name_webp' заповнюємо шляхи для OpenCart
+    # Тут скрипт робить: "catalog/product/.../sku.webp"
+    fill_opencart_paths_single_file()  # <--- НОВА ФУНКЦІЯ
+
+    # 7️⃣ Копіювання
     copy_to_site(webp_path, site_path)
     logging.info("6. ✅ Копіювання зображень на сайт завершено.")
+
+
     
     logging.info("🏁 ФАЗА 2 завершена успішно.")
+
+    import csv
+
+# ОСНОВНА ФУНКЦІЯ 11: Переклад на рос
+def translate_and_prepare_csv():
+    """
+    Переклад назви і опису з допомогою Deepl
+    Також заповнюються допоміжні СЕОполя
+    """
+    
+    oc_log_message() 
+    logging.info("🚀 Початок обробки CSV для OpenCart (Повний цикл)...")
+
+    settings = load_oc_settings()
+    
+    # --- ВИКОРИСТОВУЄМО ОДИН ФАЙЛ ---
+    csv_path = settings['paths']['csv_path_new_product']
+    api_key = settings['deepl_api_key'] # Якщо закінчаться ляміти на цьому, то треба взяти deepl_api_key2
+    api_url = settings['DEEPL_API_URL']
+
+    if not csv_path or not api_key:
+        logging.error("❌ Не вказано шлях до файлу (csv_path_new_product) або API ключ")
+        return
+
+    # 1. Завантажуємо словник позначок (виклик без аргументів, бо шлях береться з settings всередині функції)
+    tags_map = load_poznachky_csv()
+
+    # 2. Перевірка ліміту DeepL
+    get_deepl_usage(api_key)
+
+    try:
+
+        # --- КРОК 1: ЧИТАННЯ ФАЙЛУ ---
+        rows = []
+        fieldnames = []
+        
+        with open(csv_path, 'r', encoding='utf-8') as f_in:
+            reader = csv.DictReader(f_in)
+            fieldnames = list(reader.fieldnames) # Копіюємо список заголовків
+            rows = list(reader)                  # Читаємо всі дані в пам'ять
+
+        total_rows = len(rows)
+        logging.info(f"📦 Зчитано {total_rows} товарів з {csv_path}")
+
+        # --- КРОК 2: ДОДАВАННЯ НОВИХ КОЛОНОК (ЯКЩО ЇХ НЕМАЄ) ---
+        required_cols = [
+            "name|ru", "description|ru", 
+            "meta_title|ua", "meta_title|ru", 
+            "meta_keywords|ru", 
+            "meta_description|ua", "meta_description|ru"
+        ]
+        for col in required_cols:
+            if col not in fieldnames:
+                fieldnames.append(col)
+
+        # --- КРОК 3: ОБРОБКА ДАНИХ ---
+        processed_rows = []
+        
+        for idx, row in enumerate(rows, start=1):
+            # --- ЗЧИТУВАННЯ ВИХІДНИХ ДАНИХ ---
+            name_ua = row.get("name|ua", "").strip()
+            # Обережно з назвою колонки опису (у вас було "Описание")
+            desc_ua = row.get("Описание", "").strip() 
+            tags_ua_raw = row.get("Позначки", "").strip()
+            
+
+            # 1. ПЕРЕКЛАД НАЗВИ (якщо пусто)
+            if name_ua and not row.get("name|ru"):
+                row["name|ru"] = translate_text_deepl(name_ua, "RU", api_key, api_url)
+            
+            name_ru = row.get("name|ru", "") # Актуальне значення
+
+            # 2. ПЕРЕКЛАД ОПИСУ (якщо пусто)
+            if desc_ua and not row.get("description|ru"):
+                # Примітка: is_html не потрібен для нової "розумної" функції
+                row["description|ru"] = translate_text_deepl(desc_ua, "RU", api_key, api_url)
+            
+            desc_ru = row.get("description|ru", "")
+
+            # 3. META TITLE
+            # UA: Назва + суфікс
+            if name_ua:
+                row["meta_title|ua"] = f"{name_ua} 💕 Інтим-Бутік ЕРОС ❱❱ Купити секс іграшки в Україні"
+            # RU: Назва RU + суфікс
+            if name_ru:
+                row["meta_title|ru"] = f"{name_ru} 💕 Интим-Бутик ЕРОС ❱❱ Купить секс игрушки в Украине"
+
+            # 4. META KEYWORDS (RU) - Словник
+            if tags_ua_raw:
+                # Розбиваємо по комі
+                source_tags = [t.strip() for t in tags_ua_raw.split(',') if t.strip()]
+                translated_tags = []
+                
+                for tag in source_tags:
+                    # Шукаємо в словнику (lower() для точності)
+                    translated_tag = tags_map.get(tag.lower())
+                    if translated_tag:
+                        translated_tags.append(translated_tag)
+                    else:
+                        # Якщо перекладу немає - залишаємо оригінал
+                        translated_tags.append(tag) 
+                
+                row["meta_keywords|ru"] = ", ".join(translated_tags)
+
+            # 5. META DESCRIPTION
+            # UA
+            if desc_ua:
+                first_sent_ua = get_first_sentence(desc_ua)
+                row["meta_description|ua"] = f"{first_sent_ua} | Низька ціна | Швидка, безкоштовна, анонімна доставка"
+
+            # RU
+            if desc_ru:
+                first_sent_ru = get_first_sentence(desc_ru)
+                row["meta_description|ru"] = f"{first_sent_ru} | Низкая цена | Быстрая, бесплатная, анонимная доставка"
+
+            processed_rows.append(row)
+
+            if idx % 10 == 0:
+                logging.info(f"✅ Оброблено {idx}/{total_rows} товарів...")
+
+        # --- КРОК 4: ЗАПИС (ПЕРЕЗАПИС) ФАЙЛУ ---
+        with open(csv_path, 'w', encoding='utf-8', newline='') as f_out:
+            writer = csv.DictWriter(f_out, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(processed_rows)
+            
+        logging.info(f"🎉 Готово! Файл оновлено: {csv_path}")
+        
+        # Фінальна перевірка ліміту
+        get_deepl_usage(api_key)
+
+    except Exception as e:
+        logging.error(f"❌ Критична помилка: {e}")
