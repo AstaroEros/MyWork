@@ -1258,3 +1258,33 @@ def generate_slug(text, lang_code='ua'):
     slug = "".join(res)
     slug = re.sub(r'-+', '-', slug) 
     return slug.strip('-')
+
+# --- ОСНОВНА ФУНКЦІЯ ІМПОРТУ ---
+def get_or_create_manufacturer(cursor, name, store_id=0):
+    """
+    Шукає виробника за назвою. Якщо немає - створює.
+    Повертає manufacturer_id.
+    """
+    if not name:
+        return 0
+    
+    # Пошук існуючого
+    sql = "SELECT manufacturer_id FROM oc_manufacturer WHERE name = %s"
+    cursor.execute(sql, (name,))
+    result = cursor.fetchone()
+    
+    if result:
+        # Оскільки у нас DictCursor, звертаємось по ключу
+        return result['manufacturer_id']
+    
+    # Створення нового
+    logging.info(f"➕ Додаємо нового виробника: {name}")
+    
+    sql_insert = "INSERT INTO oc_manufacturer (name, sort_order) VALUES (%s, 0)"
+    cursor.execute(sql_insert, (name,))
+    new_id = cursor.lastrowid
+    
+    sql_store = "INSERT INTO oc_manufacturer_to_store (manufacturer_id, store_id) VALUES (%s, %s)"
+    cursor.execute(sql_store, (new_id, store_id))
+    
+    return new_id
