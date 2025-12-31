@@ -1,17 +1,11 @@
-import csv
-import logging
-import os
-import random
-import time
-import requests
-import re
+import csv, logging, os, random, time, requests
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from scr.oc_base_function import oc_log_message, load_oc_settings, load_attributes_csv, save_attributes_csv, \
                                 load_category_csv, append_new_categories, load_poznachky_csv, clear_directory, \
                                 download_product_images, move_gifs, convert_to_webp_square, sync_webp_column_named, \
                                 copy_to_site, fill_opencart_paths_single_file, get_deepl_usage, translate_text_deepl, \
-                                get_first_sentence
+                                get_first_sentence, generate_slug
 
 # ОСНОВНА ФУНКЦІЯ 1: Перевірка зміни артикулу і штрихкоду
 def find_change_art_shtrihcod():
@@ -1398,3 +1392,179 @@ def translate_and_prepare_csv():
 
     except Exception as e:
         logging.error(f"❌ Критична помилка: {e}")
+
+# ОСНОВНА ФУНКЦІЯ 12: Заповнення slug-ів
+def prepare_slugs():
+    oc_log_message()
+    logging.info("🔗 Початок обробки SEO URL (V3: Strict unic_slug logic)...")
+    
+    settings = load_oc_settings()
+    product_csv_path = settings['paths']['csv_path_new_product']
+    slug_db_path = settings['paths']['slug_path']
+    
+    if not product_csv_path or not slug_db_path:
+        logging.error("❌ Не вказано шляхи до файлів")
+        return
+
+    try:
+        # ==========================================
+        # ЕТАП 1: ЗАВАНТАЖЕННЯ БАЗИ SLUG-ів
+        # ==========================================
+        logging.info("📚 Завантаження бази slug-ів...")
+        
+        slug_database = {}      # Для пошуку "старих" слагав по артикулу (preference)
+        used_slugs_set = set()  # РЕЄСТР ЗАЙНЯТИХ (Тільки unic_slug)
+        unic_slug_list = []     # Список для збереження порядку запису
+        
+        slug_db_rows = []
+        slug_db_fieldnames = []
+
+        try:
+            with open(slug_db_path, 'r', encoding='utf-8') as f_slug:
+                reader_slug = csv.DictReader(f_slug)
+                slug_db_fieldnames = list(reader_slug.fieldnames)
+                
+                if "unic_slug" not in slug_db_fieldnames:
+                    slug_db_fieldnames.append("unic_slug")
+                
+                for row in reader_slug:
+                    # 1. Словник для пошуку (щоб ми знали, який slug хотіли б використати)
+                    artykul = row.get('artykul_lutsk', '').strip() if row.get('artykul_lutsk') else ''
+                    if artykul:
+                        slug_database[artykul] = {
+                            'ua': (row.get('slug|ua') or '').strip(),
+                            'ru': (row.get('slug|ru') or '').strip()
+                        }
+                    
+                    # 2. Формування списку зайнятих
+                    # УВАГА: Читаємо ТІЛЬКИ unic_slug для перевірки унікальності
+                    s_unic = (row.get('unic_slug') or "").strip()
+                    
+                    if s_unic: 
+                        used_slugs_set.add(s_unic)
+                        unic_slug_list.append(s_unic) 
+                    
+                    # Зберігаємо рядки для подальшого перезапису
+                    row_copy = row.copy()
+                    slug_db_rows.append(row_copy)
+                    
+            logging.info(f"✅ У реєстрі зайнятих (unic_slug) знайдено {len(used_slugs_set)} записів.")
+            
+        except FileNotFoundError:
+            logging.error(f"❌ Файл {slug_db_path} не знайдено")
+            return
+
+        # ==========================================
+        # ЕТАП 2: ОБРОБКА ТОВАРІВ
+        # ==========================================
+        rows = []
+        fieldnames = []
+        
+        with open(product_csv_path, 'r', encoding='utf-8') as f_in:
+            reader = csv.DictReader(f_in)
+            fieldnames = list(reader.fieldnames)
+            rows = list(reader)
+            
+        for col in ["slug|ua", "slug|ru"]:
+            if col not in fieldnames:
+                fieldnames.append(col)
+
+        processed_count = 0
+        renamed_count = 0
+        
+        # Функція перевірки та реєстрації
+        def get_unique_slug_and_register(candidate, product_ref):
+            nonlocal renamed_count
+            if not candidate: return ""
+            
+            final_slug = candidate
+            counter = 2
+            
+            # Перевіряємо ТІЛЬКИ по used_slugs_set (який наповнюється з unic_slug)
+            while final_slug in used_slugs_set:
+                final_slug = f"{candidate}-{counter}"
+                counter += 1
+            
+            if final_slug != candidate:
+                # Логуємо конфлікт тільки якщо це реальна зміна
+                logging.warning(f"⚠️ Конфлікт в unic_slug: '{candidate}' -> '{final_slug}' (Товар: {product_ref})")
+                renamed_count += 1
+                
+            # Додаємо в реєстр, щоб наступний виклик (навіть для цього ж товару, але іншої мови) вже бачив цей slug
+            used_slugs_set.add(final_slug)
+            
+            # Додаємо в список на запис у файл
+            if final_slug not in unic_slug_list:
+                unic_slug_list.append(final_slug)
+                
+            return final_slug
+
+        for row in rows:
+            product_code = row.get("Код_товара", "unknown")
+            
+            # --- UA ---
+            # 1. Шукаємо бажаний slug (з бази або генеруємо)
+            candidate_ua = (row.get("slug|ua") or "").strip()
+            if not candidate_ua and product_code in slug_database:
+                candidate_ua = slug_database[product_code]['ua']
+            if not candidate_ua:
+                candidate_ua = generate_slug(row.get("name|ua", ""), 'ua')
+            
+            # 2. Перевіряємо на унікальність по unic_slug і реєструємо
+            row["slug|ua"] = get_unique_slug_and_register(candidate_ua, f"{product_code}|UA")
+
+
+            # --- RU ---
+            # 1. Шукаємо бажаний slug
+            candidate_ru = (row.get("slug|ru") or "").strip()
+            if not candidate_ru and product_code in slug_database:
+                candidate_ru = slug_database[product_code]['ru']
+            if not candidate_ru:
+                candidate_ru = generate_slug(row.get("name|ru", ""), 'ru')
+            
+            # 2. Перевіряємо (тут unic_slug вже містить UA варіант цього товару, тому конфлікту не буде, якщо вони різні)
+            row["slug|ru"] = get_unique_slug_and_register(candidate_ru, f"{product_code}|RU")
+                
+            processed_count += 1
+            if processed_count % 100 == 0:
+                 logging.info(f"⚙️ Оброблено {processed_count} товарів...")
+
+        # ==========================================
+        # ЕТАП 3: ЗБЕРЕЖЕННЯ CSV ТОВАРІВ
+        # ==========================================
+        with open(product_csv_path, 'w', encoding='utf-8', newline='') as f_out:
+            writer = csv.DictWriter(f_out, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        logging.info(f"💾 Файл товарів збережено. Змін slug-ів (дублів): {renamed_count}")
+
+        # ==========================================
+        # ЕТАП 4: ОНОВЛЕННЯ SLUG DB
+        # ==========================================
+        logging.info("💾 Оновлення бази slug-ів (unic_slug)...")
+        
+        final_db_rows = []
+        total_rows_needed = max(len(slug_db_rows), len(unic_slug_list))
+        
+        for i in range(total_rows_needed):
+            if i < len(slug_db_rows):
+                new_row = slug_db_rows[i]
+            else:
+                new_row = {k: '' for k in slug_db_fieldnames if k != 'unic_slug'}
+            
+            if i < len(unic_slug_list):
+                new_row['unic_slug'] = unic_slug_list[i]
+            else:
+                new_row['unic_slug'] = '' 
+                
+            final_db_rows.append(new_row)
+        
+        with open(slug_db_path, 'w', encoding='utf-8', newline='') as f_db_out:
+            writer_db = csv.DictWriter(f_db_out, fieldnames=slug_db_fieldnames)
+            writer_db.writeheader()
+            writer_db.writerows(final_db_rows)
+            
+        logging.info(f"🎉 Готово! unic_slug оновлено. Всього записів: {len(unic_slug_list)}")
+
+    except Exception as e:
+        logging.error(f"❌ Помилка в prepare_slugs: {e}", exc_info=True)

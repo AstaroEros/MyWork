@@ -5,7 +5,7 @@ from scr.oc_products import oc_export_products, download_supplier_price_list, \
                             process_supplier_1_price_list, process_supplier_2_price_list, process_supplier_3_price_list
 from scr.oc_suppliers_1 import find_new_products, find_change_art_shtrihcod, find_product_url, parse_product_attributes, apply_final_standardization, \
                                 fill_auxiliary_columns, refill_product_category, separate_existing_products, assign_new_sku_to_products, \
-                                process_phase_1_download, process_phase_2_finish, translate_and_prepare_csv
+                                process_phase_1_download, process_phase_2_finish, translate_and_prepare_csv, prepare_slugs
 
 
 def main():
@@ -149,6 +149,12 @@ def main():
         help="Перекласти CSV new_product.csv на російську через DeepL"
     )
 
+    # ✨ НОВА КОМАНДА ДЛЯ ГЕНЕРАЦІЇ slug
+    parser.add_argument(
+        "--prepare-slugs",
+        action="store_true",
+        help="Згенерувати нові унікальні slug для бд"
+    )
     # 3. Парсинг аргументів
     args = parser.parse_args()
 
@@ -214,6 +220,9 @@ def main():
     elif args.translate_ru:
         print("🌐 Запускаю переклад CSV new_product.csv на російську через DeepL...")
         translate_and_prepare_csv()
+    elif args.prepare_slugs:
+        print("🌐 Запускаю генерацію slug")
+        prepare_slugs()
     else:
         print("❌ Не вказано жодної дії. Використайте --help для отримання списку команд.\n")
         parser.print_help()

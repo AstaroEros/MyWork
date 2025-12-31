@@ -1192,3 +1192,69 @@ def translate_text_deepl(text, target_lang="RU", api_key=None, api_url=None):
         out.append("".join(translated_pieces))
 
     return "".join(out)
+
+# Допоміжна функція для транслітерації (щоб не залежати від зовнішніх бібліотек)
+def generate_slug(text, lang_code='ua'):
+    """
+    Перетворює рядок на SEO-friendly slug (транслітерація + очистка).
+    lang_code: 'ua' або 'ru' для вибору правильних правил.
+    """
+    if not text:
+        return ""
+    
+    text = text.lower().strip()
+    
+    # Спільні правила для обох мов
+    common_dict = {
+        'а': 'a', 'б': 'b', 'в': 'v', 'д': 'd', 'е': 'e', 'з': 'z',
+        'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o', 'п': 'p',
+        'р': 'r', 'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'kh',
+        'ж': 'zh', 'ц': 'ts', 'ч': 'ch', 'ш': 'sh', 'щ': 'shch',
+        'ь': '', 'ъ': '', '\'': '', '’': '', '`': ''
+    }
+
+    # Специфічні правила для української (згідно скріну)
+    ua_specific = {
+        'г': 'h',  # Hralni, Vahinalni
+        'ґ': 'g',
+        'и': 'y',  # Lubrykant
+        'і': 'i',
+        'ї': 'yi',
+        'й': 'j',  # Chervonyj, Rozhevyj (важливо!)
+        'є': 'ie',
+        'ю': 'iu', # Peniuar
+        'я': 'ia'  # Khvyliastyj
+    }
+
+    # Специфічні правила для російської
+    ru_specific = {
+        'г': 'g',
+        'и': 'i',  # Muzhskie
+        'ы': 'y',
+        'э': 'e',
+        'ё': 'yo',
+        'й': 'j',  # Klassicheskij
+        'ю': 'yu',
+        'я': 'ya'  # Vakuumnaya
+    }
+
+    # Вибір словника
+    translit_dict = common_dict.copy()
+    if lang_code == 'ru':
+        translit_dict.update(ru_specific)
+    else:
+        translit_dict.update(ua_specific)
+    
+    res = []
+    for char in text:
+        if char in translit_dict:
+            res.append(translit_dict[char])
+        elif char.isalnum(): # Залишаємо цифри та латинські букви
+            res.append(char)
+        elif char.isspace() or char in ['-', '_']:
+            res.append('-')
+            
+    # З'єднуємо, прибираємо дублювання дефісів
+    slug = "".join(res)
+    slug = re.sub(r'-+', '-', slug) 
+    return slug.strip('-')
