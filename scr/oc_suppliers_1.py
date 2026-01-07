@@ -356,7 +356,7 @@ def find_product_url():
                         else:
                             not_found_count += 1
                             not_found_rows.append(idx + 2)
-
+                        logging.info(f"Рядок {idx + 2}: Знайдено урл: {found_url}")
                         # Записуємо (знайдений або незмінений) рядок у тимчасовий файл
                         writer.writerow(row)
 
@@ -395,7 +395,7 @@ def find_product_url():
             os.remove(temp_file_path)
         logging.error(f"Виникла непередбачена помилка: {e}")
 
-# ОСНОВНА ФУНКЦІЯ 4: Парсинг атрибутів
+# ОСНОВНА ФУНКЦІЯ 4: Парсинг атрибутів (Перевірити назви товарів!!!)
 def parse_product_attributes():
     oc_log_message()
     logging.info("▶ ФУНКЦІЯ: Парсинг (Mapping + Auto-suffix |ua + Next Col RU)")
@@ -412,6 +412,10 @@ def parse_product_attributes():
     ATTRIBUTE_NAME_MAPPING = {
         "Країна": "Зроблено в|ua",
         "Марка/Лінія": "Виробник|ua",
+        "Місткість (мл)": "Об'єм|ua",
+        "Довжина (см)": "Довжина|ua", 
+        "Діаметр (см)": "Діаметр|ua"
+
         # Додавайте сюди нові, якщо будуть розбіжності
         # "Матеріал": "Склад тканини|ua", 
     }
@@ -776,7 +780,7 @@ def fill_auxiliary_columns():
                     if any(lookup_key) and lookup_key not in seen_new_keys:
                         new_category_entries.append({
                             'name_1': c1, 'name_2': c2, 'name_3': c3,
-                            'category_name': f"{c1} {c2} {c3}".strip(),
+                            'category_name': '',
                             'category': '', 'Категорія|ua': '', 'Категория|ru': ''
                         })
                         seen_new_keys.add(lookup_key)
@@ -792,7 +796,7 @@ def fill_auxiliary_columns():
 
                 # --- 3. ЗАПОВНЕННЯ OPENCART ДАНИХ ---
                 
-                row["status"] = "0" 
+                row["status"] = "1" 
                 row["stock_status_id"] = "5" 
                 row["subtract"] = "1"
                 row["minimum"] = "1"
@@ -1364,15 +1368,22 @@ def translate_and_prepare_csv():
                 row["meta_keywords|ru"] = ", ".join(translated_tags)
 
             # 5. META DESCRIPTION
+            # Ліміт БД 255 символів. Суфікси займають ~60 символів.
+            # Тому обрізаємо речення до 190 символів.
+            
             # UA
+            suffix_ua = " | Низька ціна | Швидка, безкоштовна, анонімна доставка"
             if desc_ua:
-                first_sent_ua = get_first_sentence(desc_ua)
-                row["meta_description|ua"] = f"{first_sent_ua} | Низька ціна | Швидка, безкоштовна, анонімна доставка"
+                # Передаємо ліміт 190
+                first_sent_ua = get_first_sentence(desc_ua, max_length=190)
+                row["meta_description|ua"] = f"{first_sent_ua}{suffix_ua}"
 
             # RU
+            suffix_ru = " | Низкая цена | Быстрая, бесплатная, анонимная доставка"
             if desc_ru:
-                first_sent_ru = get_first_sentence(desc_ru)
-                row["meta_description|ru"] = f"{first_sent_ru} | Низкая цена | Быстрая, бесплатная, анонимная доставка"
+                # Передаємо ліміт 190
+                first_sent_ru = get_first_sentence(desc_ru, max_length=190)
+                row["meta_description|ru"] = f"{first_sent_ru}{suffix_ru}"
 
             processed_rows.append(row)
 
@@ -1569,62 +1580,109 @@ def prepare_slugs():
     except Exception as e:
         logging.error(f"❌ Помилка в prepare_slugs: {e}", exc_info=True)
 
+import csv
+import logging
+import pymysql
+from datetime import datetime
+from scr.oc_base_function import oc_log_message, load_oc_settings
+
+# --- ПІДКЛЮЧЕННЯ ---
+def oc_connect_db():
+    settings = load_oc_settings()
+    if not settings or "db" not in settings:
+        raise Exception("❌ Неможливо завантажити DB-налаштування")
+
+    db = settings["db"]
+    try:
+        connection = pymysql.connect(
+            host=db["host"],
+            user=db["user"],
+            password=db["password"], 
+            database=db["database"],
+            port=db.get("port", 3306),
+            charset="utf8mb4",
+            cursorclass=pymysql.cursors.DictCursor
+        )
+        return connection
+    except Exception as e:
+        print(f"❌ Помилка підключення до БД OpenCart: {e}")
+        return None
+
+# --- ОЧИСТКА ТЕКСТУ ---
+def clean_text(text, strict=False):
+    if not text:
+        return ""
+    if strict:
+        return text.strip()
+    return text
+
+# --- ВИРОБНИК ---
+def get_or_create_manufacturer(cursor, name, store_id=0):
+    if not name:
+        return 0
+    name = clean_text(name, strict=True)
+    
+    sql = "SELECT manufacturer_id FROM oc_manufacturer WHERE name = %s"
+    cursor.execute(sql, (name,))
+    result = cursor.fetchone()
+    
+    if result:
+        return result['manufacturer_id']
+    
+    sql_insert = "INSERT INTO oc_manufacturer (name, sort_order) VALUES (%s, 0)"
+    cursor.execute(sql_insert, (name,))
+    new_id = cursor.lastrowid
+    
+    sql_store = "INSERT INTO oc_manufacturer_to_store (manufacturer_id, store_id) VALUES (%s, %s)"
+    cursor.execute(sql_store, (new_id, store_id))
+    return new_id
+
 # --- ОСНОВНА ФУНКЦІЯ ІМПОРТУ ---
 def import_products_to_db():
-    """
-    Завантаження товарів з CSV прямо в MySQL базу OpenCart.
-    """
     oc_log_message()
-    logging.info("🚀 Початок імпорту товарів в БД...")
+    logging.info("🚀 Початок Розумного Імпорту (Update/Insert)...")
 
     settings = load_oc_settings()
     
-    # 1. Отримуємо шляхи та мапу атрибутів з налаштувань
     try:
         csv_path = settings['paths']['csv_path_new_product']
         attribute_map = settings.get('attribute_map', {})
-        
-        if not attribute_map:
-            logging.warning("⚠️ УВАГА: 'attribute_map' не знайдено в oc_settings.yaml! Атрибути не будуть додані.")
-            
     except KeyError as e:
-        logging.error(f"❌ Помилка в структурі settings.json/yaml: {e}")
+        logging.error(f"❌ Помилка налаштувань: {e}")
         return
 
-    # 2. Підключення до БД
     conn = oc_connect_db()
     if not conn:
-        logging.error("❌ Робота зупинена через помилку підключення до БД.")
         return
 
     cursor = conn.cursor()
     
-    count_success = 0
+    # Лічильники
+    count_new = 0
+    count_updated = 0
     count_errors = 0
 
-    # 3. Читання CSV
     with open(csv_path, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         
         for row in reader:
             try:
                 # --- ПІДГОТОВКА ДАНИХ ---
-                sku = row.get('sku', '').strip()
+                sku = clean_text(row.get('sku', ''), strict=True)
                 if not sku:
                     continue
 
-                # === ВАЖЛИВО: ПЕРЕВІРКА НА ДУБЛІКАТИ ===
-                cursor.execute("SELECT product_id FROM oc_product WHERE sku = %s", (sku,))
-                if cursor.fetchone():
-                    logging.warning(f"⚠️ Товар SKU {sku} вже існує. Пропускаємо.")
-                    count_skipped += 1
-                    continue
-                # =======================================
-
+                # Дані для обробки
                 price = float(row.get('price', 0))
-                # Перетворення наявності (іноді там текст "Є в наявності", обробляємо безпечно)
-                qty_raw = row.get('Наличие', '0')
-                quantity = int(qty_raw) if str(qty_raw).isdigit() else 0
+                
+                # Гнучкий пошук кількості
+                qty_raw = '0'
+                for key in row.keys():
+                    if key.strip() == 'Наличие':
+                        qty_raw = row[key]
+                        break
+                qty_raw = str(qty_raw).strip()
+                quantity = int(qty_raw) if qty_raw.isdigit() else 0
                 
                 status = int(row.get('status', 0))
                 stock_status_id = int(row.get('stock_status_id', 7))
@@ -1638,47 +1696,80 @@ def import_products_to_db():
                 
                 date_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-                # --- 1. ВСТАВКА В oc_product ---
-                # ВИПРАВЛЕННЯ: Додано oct_stickers (пустий рядок), щоб задовольнити вимоги шаблону
-                sql_product = """
-                    INSERT INTO oc_product 
-                    (model, sku, upc, ean, jan, isbn, mpn, location, 
-                     quantity, stock_status_id, image, manufacturer_id, 
-                     shipping, price, date_added, date_modified, status, minimum, subtract,
-                     points, tax_class_id, date_available, weight, weight_class_id, 
-                     length, width, height, length_class_id, sort_order,
-                     oct_stickers)
-                    VALUES (%s, %s, '', '', '', '', '', '', 
-                            %s, %s, %s, %s, 
-                            %s, %s, %s, %s, %s, %s, %s,
-                            0, 0, %s, 0, 1, 
-                            0, 0, 0, 1, 0,
-                            '')
-                """
+                # =======================================
+                # КРОК 1: Перевіряємо, чи є товар
+                # =======================================
+                cursor.execute("SELECT product_id FROM oc_product WHERE sku = %s", (sku,))
+                existing_prod = cursor.fetchone()
                 
-                cursor.execute(sql_product, (
-                    sku,            # model
-                    sku,            # sku
-                    # upc...location (пустишки прописані в SQL)
-                    quantity, 
-                    stock_status_id, 
-                    main_image, 
-                    manufacturer_id,
-                    shipping, 
-                    price, 
-                    date_now,       # date_added
-                    date_now,       # date_modified
-                    status, 
-                    minimum, 
-                    subtract,
-                    # points (0), tax_class_id (0)
-                    date_now,       # date_available
-                    # weight (0), weight_class_id (1), length... (0), sort_order (0)
-                    # oct_stickers ('') - прописано в SQL
-                ))
-                product_id = cursor.lastrowid
+                product_id = 0
+                is_update = False
 
-                # --- 2. ВСТАВКА В oc_product_description (UA=2, RU=3) ---
+                if existing_prod:
+                    # --- РЕЖИМ ОНОВЛЕННЯ (UPDATE) ---
+                    product_id = existing_prod['product_id']
+                    is_update = True
+                    
+                    # Оновлюємо основні поля в oc_product
+                    sql_update = """
+                        UPDATE oc_product SET 
+                            quantity = %s, price = %s, image = %s, 
+                            manufacturer_id = %s, status = %s, stock_status_id = %s,
+                            date_modified = %s
+                        WHERE product_id = %s
+                    """
+                    cursor.execute(sql_update, (
+                        quantity, price, main_image, 
+                        manufacturer_id, status, stock_status_id, 
+                        date_now, product_id
+                    ))
+                    
+                    # 1. СПЕЦИФІЧНА ОЧИСТКА ДЛЯ SEO URL (Тут product_id немає, є query)
+                    cursor.execute("DELETE FROM oc_seo_url WHERE query = %s", (f"product_id={product_id}",))
+
+                    # 2. ОЧИСТКА ІНШИХ ТАБЛИЦЬ (Де є колонка product_id)
+                    # ВИПРАВЛЕННЯ: Я прибрав 'oc_seo_url' з цього списку!
+                    tables_to_clean = [
+                        'oc_product_description', 'oc_product_attribute', 
+                        'oc_product_image', 'oc_product_to_category', 
+                        'oc_product_to_store', 'oc_product_acf'
+                    ]
+                    for table in tables_to_clean:
+                        cursor.execute(f"DELETE FROM {table} WHERE product_id = %s", (product_id,))
+
+                else:
+                    # --- РЕЖИМ СТВОРЕННЯ (INSERT) ---
+                    sql_insert = """
+                        INSERT INTO oc_product 
+                        (model, sku, upc, ean, jan, isbn, mpn, location, 
+                         quantity, stock_status_id, image, manufacturer_id, 
+                         shipping, price, date_added, date_modified, status, minimum, subtract,
+                         points, tax_class_id, date_available, weight, weight_class_id, 
+                         length, width, height, length_class_id, sort_order,
+                         oct_stickers)
+                        VALUES (%s, %s, '', '', '', '', '', '', 
+                                %s, %s, %s, %s, 
+                                %s, %s, %s, %s, %s, %s, %s,
+                                0, 0, %s, 0, 1, 
+                                0, 0, 0, 1, 0,
+                                '')
+                    """
+                    cursor.execute(sql_insert, (
+                        sku, sku, quantity, stock_status_id, main_image, manufacturer_id,
+                        shipping, price, date_now, date_now, status, minimum, subtract,
+                        date_now
+                    ))
+                    product_id = cursor.lastrowid
+
+                # =======================================
+                # КРОК 2: Заповнення залежних таблиць (Однаково для Update та Insert)
+                # =======================================
+                
+                # --- SEO URL (Специфічна очистка для Update) ---
+                if is_update:
+                     cursor.execute("DELETE FROM oc_seo_url WHERE query = %s", (f"product_id={product_id}",))
+
+                # --- oc_product_description ---
                 name_ua = row.get('name|ua', 'Product Name')
                 desc_ua = row.get('Описание', '') 
                 meta_title_ua = row.get('meta_title|ua', name_ua)
@@ -1691,17 +1782,15 @@ def import_products_to_db():
                 meta_desc_ru = row.get('meta_description|ru', '')
                 meta_key_ru = row.get('meta_keywords|ru', '')
 
-                # ВИПРАВЛЕННЯ: Додано поле tag з пустим значенням ('')
                 sql_desc = """
                     INSERT INTO oc_product_description 
                     (product_id, language_id, name, description, meta_title, meta_description, meta_keyword, tag)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, '')
                 """
-                
                 cursor.execute(sql_desc, (product_id, 2, name_ua, desc_ua, meta_title_ua, meta_desc_ua, meta_key_ua))
                 cursor.execute(sql_desc, (product_id, 3, name_ru, desc_ru, meta_title_ru, meta_desc_ru, meta_key_ru))
 
-                # --- 3. ВСТАВКА В oc_product_acf ---
+                # --- oc_product_acf ---
                 sql_acf = """
                     INSERT INTO oc_product_acf
                     (product_id, shtrihcod, lutsk_sku, lutsk_url, supplier_main)
@@ -1709,42 +1798,40 @@ def import_products_to_db():
                 """
                 cursor.execute(sql_acf, (
                     product_id, 
-                    row.get('shtrih_cod', ''), 
-                    row.get('Код_товара', ''), 
+                    clean_text(row.get('shtrih_cod', ''), strict=True), 
+                    clean_text(row.get('Код_товара', ''), strict=True), 
                     row.get('url_lutsk', ''), 
-                    row.get('postachalnyk', '')
+                    clean_text(row.get('postachalnyk', ''), strict=True)
                 ))
 
-                # --- 4. ВСТАВКА В oc_product_to_store ---
+                # --- Stores ---
                 store_id = int(row.get('store_id', 0))
                 cursor.execute("INSERT INTO oc_product_to_store (product_id, store_id) VALUES (%s, %s)", (product_id, store_id))
 
-                # --- 5. ВСТАВКА КАТЕГОРІЙ ---
+                # --- Categories ---
                 cats_str = row.get('category', '')
                 if cats_str:
                     cat_ids = [c.strip() for c in cats_str.split(',') if c.strip().isdigit()]
                     for c_id in cat_ids:
                         cursor.execute("INSERT INTO oc_product_to_category (product_id, category_id) VALUES (%s, %s)", (product_id, int(c_id)))
 
-                # --- 6. ВСТАВКА АТРИБУТІВ (Динамічно з налаштувань) ---
+                # --- Attributes ---
                 if attribute_map:
                     sql_attr = "INSERT INTO oc_product_attribute (product_id, attribute_id, language_id, text) VALUES (%s, %s, %s, %s)"
-                    
                     for col_name, attr_id in attribute_map.items():
-                        # Перевіряємо, чи є така колонка в CSV і чи вона не пуста
                         val = row.get(col_name, '').strip()
                         if val:
                             lang_id = 2 if '|ua' in col_name else 3
                             cursor.execute(sql_attr, (product_id, attr_id, lang_id, val))
 
-                # --- 7. ДОДАТКОВІ ЗОБРАЖЕННЯ ---
+                # --- Images ---
                 add_imgs_str = row.get('img_path', '')
                 if add_imgs_str:
                     imgs_list = [img.strip() for img in add_imgs_str.split(',') if img.strip()]
                     for img_p in imgs_list:
                         cursor.execute("INSERT INTO oc_product_image (product_id, image, sort_order) VALUES (%s, %s, 0)", (product_id, img_p))
 
-                # --- 8. SEO URL (OpenCart 3) ---
+                # --- SEO URL ---
                 slug_ua = row.get('slug|ua', '')
                 slug_ru = row.get('slug|ru', '')
                 
@@ -1756,18 +1843,23 @@ def import_products_to_db():
                 if slug_ru:
                     cursor.execute(sql_seo, (store_id, 3, query_str, slug_ru))
 
-                # Фіксація змін для товару
+                # Фіксація
                 conn.commit()
-                count_success += 1
-                logging.info(f"✅ Товар додано ID: {product_id} (SKU: {sku})")
+                
+                if is_update:
+                    count_updated += 1
+                    logging.info(f"🔄 Товар оновлено ID: {product_id} (SKU: {sku})")
+                else:
+                    count_new += 1
+                    logging.info(f"✅ Товар створено ID: {product_id} (SKU: {sku})")
 
             except Exception as e:
-                conn.rollback() # Відміна змін
+                conn.rollback()
                 count_errors += 1
-                logging.error(f"❌ Помилка імпорту SKU {row.get('sku', '?')}: {e}")
+                logging.error(f"❌ Помилка SKU {row.get('sku', '?')}: {e}")
 
     cursor.close()
     conn.close()
-    
     logging.info("---")
-    logging.info(f"🏁 Імпорт завершено. Успішно: {count_success}, Помилок: {count_errors}")
+    logging.info(f"🏁 Завершено. Нових: {count_new}, Оновлено: {count_updated}, Помилок: {count_errors}")
+

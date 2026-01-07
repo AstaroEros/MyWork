@@ -1097,14 +1097,36 @@ def strip_html_tags(text):
     clean = re.compile('<.*?>')
     return re.sub(clean, '', text)
 
-def get_first_sentence(text):
-    """Бере текст, чистить від HTML і повертає перше речення"""
+def get_first_sentence(text, max_length=0):
+    """
+    Бере текст, чистить від HTML, повертає перше речення.
+    Якщо вказано max_length і речення довше — обрізає до останнього пробілу та додає '...'.
+    """
+    if not text:
+        return ""
+
     plain_text = strip_html_tags(text)
+    
     # Розбиваємо по крапці, знаку оклику або питання
     match = re.split(r'(?<=[.!?])\s+', plain_text, 1)
-    if match:
-        return match[0].strip()
-    return plain_text.strip()
+    
+    sentence = match[0].strip() if match else plain_text.strip()
+
+    # Логіка обрізки, якщо перевищено ліміт
+    if max_length > 0 and len(sentence) > max_length:
+        # 1. Обрізаємо жорстко по ліміту
+        truncated = sentence[:max_length]
+        
+        # 2. Шукаємо останній пробіл, щоб не різати слово посередині
+        last_space_index = truncated.rfind(' ')
+        
+        if last_space_index > 0:
+            sentence = truncated[:last_space_index] + "..."
+        else:
+            # Якщо пробілів взагалі немає (дуже довге слово), ріжемо як є
+            sentence = truncated + "..."
+            
+    return sentence
 
 def translate_text_deepl(text, target_lang="RU", api_key=None, api_url=None):
     """
